@@ -1,0 +1,50 @@
+# Python virtual environment
+bin/
+lib/
+lib64
+include/
+share/
+pyvenv.cfg
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Model artifacts (generated outputs)
+src/telco_churn/artifacts/
+
+# Predictions & reports (generated outputs)
+src/telco_churn/outputs/
+src/telco_churn/reports/
+
+# Processed data (regenerable from raw data)
+data/processed/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Distribution
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Claude Code settings
+.claude/
