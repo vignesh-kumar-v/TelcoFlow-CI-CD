@@ -13,7 +13,7 @@ score:
 	python -m src.telco_churn.batch_score
 
 test:
-	pytest tests/
+	PYTHONPATH=. pytest tests/
 
 clean:
 	find . -type f -name "*.pyc" -delete

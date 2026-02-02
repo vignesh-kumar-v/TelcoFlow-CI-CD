@@ -5,6 +5,9 @@ lib64
 include/
 share/
 pyvenv.cfg
+venv/
+.venv/
+.python-version
 
 # Python bytecode
 __pycache__/
@@ -27,24 +30,43 @@ data/processed/
 .coverage
 htmlcov/
 
-# Distribution
+# Distribution / Packaging
 *.egg-info/
+*.egg
 dist/
 build/
+*.whl
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# ML experiment tracking
+mlruns/
+.dvc/
+
+# Serialized models (standalone)
+*.pkl
+*.pickle
+
+# Logs
+logs/
+*.log
 
 # IDE
 .vscode/
 .idea/
+*.iml
 *.swp
 *.swo
+*~
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Environment
+# Environment variables
 .env
-.env.local
+.env.*
 
 # Claude Code settings
 .claude/

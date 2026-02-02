@@ -7,7 +7,7 @@ import typer
 from rich.console import Console
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OrdinalEncoder
-import lightgbm as lightgbm
+import lightgbm
 from sklearn.metrics import classification_report, roc_auc_score
 
 console = Console()
@@ -88,8 +88,8 @@ def save_artifacts(model, preprocessor, metrics: dict, df_train: pd.DataFrame, a
         json.dump(metrics, f, indent=2)
     console.log(f"[green]Artifacts saved!")
 
-def main(clean_path: Path = Path("/home/vignesh/TelecomChurn/data/processed/cleaned_data.parquet"),
-    artifacts_dir: Path = Path("artifacts"),
+def main(clean_path: Path = Path(__file__).resolve().parent.parent.parent / "data" / "processed" / "cleaned_data.parquet",
+    artifacts_dir: Path = Path(__file__).resolve().parent / "artifacts",
     random_state: int = 42):
     console.rule("[bold magenta]Telco Churn: Training Pipeline")
     df = load_clean_data(clean_path)
