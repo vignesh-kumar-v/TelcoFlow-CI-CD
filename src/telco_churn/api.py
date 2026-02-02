@@ -14,6 +14,10 @@ from datetime import datetime
 import typer
 from rich.console import Console
 
+from src.telco_churn.train import (
+    prepare_data_lgbm, DROP_COLS, NOMINAL_FEATURES, ORDINAL_FEATURES,
+)
+
 app = FastAPI(title="Telco Churn Prediction API", version="1.0.0")
 console = Console()
 
@@ -101,8 +105,10 @@ def predict_churn(features: CustomerFeatures):
         # Convert Pydantic model to DataFrame
         df = pd.DataFrame([features.dict()])
 
+        df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
+
         # Apply preprocessing (same as training!)
-        X_processed = preprocessor.transform(df)
+        X_processed, _ = prepare_data_lgbm(df, preprocessor)
 
         # Get prediction probability
         probability = model.predict_proba(X_processed)[0, 1]

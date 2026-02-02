@@ -1,4 +1,4 @@
-.PHONY: install validate train score test clean api docker-build docker-run unit-test
+.PHONY: install validate train score test clean api docker-build docker-run unit-test tune train-quick
 
 install:
 	pip install -r requirements.txt
@@ -8,6 +8,12 @@ validate:
 
 train:
 	python -m src.telco_churn.train
+
+train-quick:
+	python -m src.telco_churn.train --skip-tuning
+
+tune:
+	python -m src.telco_churn.train --n-trials 100
 
 score:
 	python -m src.telco_churn.batch_score

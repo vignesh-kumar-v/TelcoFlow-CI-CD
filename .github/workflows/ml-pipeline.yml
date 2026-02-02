@@ -27,7 +27,7 @@ jobs:
       run: make validate
 
     - name: Run training
-      run: make train
+      run: make train-quick
 
     - name: Run batch scoring
       run: make score
