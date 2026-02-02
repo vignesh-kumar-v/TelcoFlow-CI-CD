@@ -64,8 +64,8 @@ def save_clean_data(df: pd.DataFrame, processed_path: Path):
     console.log(f"[green]Saved {len(df)} rows to {processed_path}")
 
 def main(
-    raw_path: Path=Path(__file__).resolve().parent.parent.parent / "data" / "raw" / "Telco-Customer-Churn.csv",
-    processed_path: Path=Path(__file__).resolve().parent.parent.parent / "data" / "processed" / "cleaned_data.parquet"
+    raw_path: Path=Path.cwd() / "data" / "raw" / "Telco-Customer-Churn.csv",
+    processed_path: Path=Path.cwd() / "data" / "processed" / "cleaned_data.parquet"
     ):
     console.rule("[bold magenta]Telco churn: Data validation and cleaning")
     df = load_raw_data(raw_path)

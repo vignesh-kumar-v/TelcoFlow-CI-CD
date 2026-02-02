@@ -19,7 +19,7 @@ def test_cleaned_data_exists():
     assert "Churn" in df.columns, "Target column 'Churn' not found"
 
 def test_artifacts_exist():
-    artifacts_dir = Path("src/telco_churn/artifacts")
+    artifacts_dir = Path("artifacts")
     assert artifacts_dir.exists(), "Artifacts directory not found"
     runs = [d for d in artifacts_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
     assert len(runs) > 0, "No training runs found in artifacts/"
@@ -30,7 +30,7 @@ def test_artifacts_exist():
         assert file_path.exists(), f"Missing artifact: {file_path}"
 
 def test_outputs_exist():
-    outputs_dir = Path("src/telco_churn/outputs")
+    outputs_dir = Path("outputs")
     assert outputs_dir.exists(), "Outputs directory not found"
     parquet_files = list(outputs_dir.glob("predictions_*.parquet"))
     csv_files = list(outputs_dir.glob("predictions_*.csv"))

@@ -102,10 +102,10 @@ def generate_drift_report(scoring_df: pd.DataFrame, train_info: dict, reports_di
     return drift_report
 
 def main(
-    scoring_data_path: Path = Path(__file__).resolve().parent.parent.parent / "data" / "processed" / "cleaned_data.parquet",
-    artifacts_dir: Path = Path(__file__).resolve().parent / "artifacts",
-    outputs_dir: Path = Path(__file__).resolve().parent / "outputs",
-    reports_dir: Path = Path(__file__).resolve().parent / "reports"):
+    scoring_data_path: Path = Path.cwd() / "data" / "processed" / "cleaned_data.parquet",
+    artifacts_dir: Path = Path.cwd() / "artifacts",
+    outputs_dir: Path = Path.cwd() / "outputs",
+    reports_dir: Path = Path.cwd() / "reports"):
 
     console.rule("[bold magenta]Telco Churn: Batch Scoring Pipeline")
     latest_run_dir = get_latest_artifact_path(artifacts_dir)

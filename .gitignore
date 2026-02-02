@@ -16,11 +16,11 @@ __pycache__/
 *.so
 
 # Model artifacts (generated outputs)
-src/telco_churn/artifacts/
+artifacts/
 
 # Predictions & reports (generated outputs)
-src/telco_churn/outputs/
-src/telco_churn/reports/
+outputs/
+reports/
 
 # Processed data (regenerable from raw data)
 data/processed/
