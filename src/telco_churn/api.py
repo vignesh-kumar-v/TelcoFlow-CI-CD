@@ -61,7 +61,7 @@ def load_model():
     global model, preprocessor, latest_run_dir
 
     console.log("[blue]Loading latest model...")
-    artifacts_dir = Path("artifacts")
+    artifacts_dir = Path.cwd() / "artifacts"
 
     # Get latest run
     runs = [d for d in artifacts_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
