@@ -1,0 +1,54 @@
+# Namespace, config and storage shared by the API and the scoring CronJob.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: telco-churn
+  labels:
+    app.kubernetes.io/name: telco-churn
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: telco-churn-config
+  namespace: telco-churn
+data:
+  # SQLite keeps the cluster self-contained. Point DB_URL at a Postgres
+  # Service to use the warehouse path instead.
+  #
+  # Three slashes, not four: sqlite:/// is relative to the working directory
+  # (/home/mluser/app), while sqlite://// would mean an absolute /data that the
+  # non-root container has no permission to create.
+  DB_URL: "sqlite:///data/telco.db"
+  MLFLOW_TRACKING_URI: "sqlite:///artifacts/mlflow.db"
+  PYTHONUNBUFFERED: "1"
+
+---
+# Artifacts are shared: the training/scoring Job writes them, the API reads
+# them. ReadWriteOnce is enough on minikube (single node); a real multi-node
+# cluster needs ReadWriteMany or an object-store artifact root.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: telco-artifacts
+  namespace: telco-churn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: telco-data
+  namespace: telco-churn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

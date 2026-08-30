@@ -1,0 +1,111 @@
+# The prediction API: Deployment + Service.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telco-churn-api
+  namespace: telco-churn
+  labels:
+    app: telco-churn-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: telco-churn-api
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0   # never drop below capacity during a rollout
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: telco-churn-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000       # lets the non-root user read the mounted PVC
+      containers:
+        - name: api
+          # Immutable version tag, never :latest. The cluster's containerd keeps
+          # its own image store, so with :latest + IfNotPresent a rebuilt image
+          # is silently ignored and pods keep running the stale one. Bumping the
+          # tag is what forces the new image in. `make docker-build` tags both
+          # this version and latest.
+          image: telco-churn-mlops:0.2.0
+          # There is no registry to pull from — the image is built locally.
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "src.telco_churn.api"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: telco-churn-config
+
+          # Liveness and readiness are deliberately different endpoints.
+          #
+          # /health is liveness: 200 whenever the process is up. Restarting a
+          # container cannot produce a model that was never trained, so a
+          # missing model must not trigger restarts.
+          #
+          # /ready is readiness: 503 until a model is loaded, which keeps the
+          # pod out of the Service endpoints. Probes only inspect the status
+          # code, so a 200 body saying "no_model" would still be admitted and
+          # the pod would receive traffic it cannot serve.
+          #
+          # /ready also retries the load, so pods that start before the training
+          # Job finishes become ready on their own without a restart.
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            failureThreshold: 30
+            periodSeconds: 2      # up to 60s for the process to come up
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # matplotlib/joblib write temp files
+            capabilities:
+              drop: ["ALL"]
+
+          # Serving needs the model only. Engineered features are recomputed
+          # from the request payload, so no data volume is required.
+          volumeMounts:
+            - name: artifacts
+              mountPath: /home/mluser/app/artifacts
+              readOnly: true
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: telco-artifacts
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telco-churn-api
+  namespace: telco-churn
+spec:
+  type: ClusterIP
+  selector:
+    app: telco-churn-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

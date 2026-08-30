@@ -1,0 +1,107 @@
+# Batch workloads: a one-shot training Job and a nightly scoring CronJob.
+---
+# Run once to populate the artifacts volume, so the API has a model to serve:
+#   kubectl create job --from=cronjob/telco-churn-scoring manual-run -n telco-churn
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: telco-churn-train
+  namespace: telco-churn
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400   # reap the pod after a day
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: train
+          image: telco-churn-mlops:0.2.0
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              python -m src.telco_churn.sql_features
+              python -m src.telco_churn.train --skip-tuning
+          envFrom:
+            - configMapRef:
+                name: telco-churn-config
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: artifacts
+              mountPath: /home/mluser/app/artifacts
+            # Mounted at data/processed, not data/: a volume over data/ would
+            # shadow data/raw/Telco-Customer-Churn.csv, which ships in the image.
+            - name: data
+              mountPath: /home/mluser/app/data/processed
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: telco-artifacts
+        - name: data
+          persistentVolumeClaim:
+            claimName: telco-data
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: telco-churn-scoring
+  namespace: telco-churn
+spec:
+  schedule: "0 2 * * *"          # 02:00 daily
+  concurrencyPolicy: Forbid       # never let two scoring runs overlap
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            fsGroup: 1000
+          containers:
+            - name: score
+              image: telco-churn-mlops:0.2.0
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "src.telco_churn.batch_score"]
+              envFrom:
+                - configMapRef:
+                    name: telco-churn-config
+              resources:
+                requests:
+                  cpu: 250m
+                  memory: 512Mi
+                limits:
+                  cpu: "1"
+                  memory: 2Gi
+              volumeMounts:
+                - name: artifacts
+                  mountPath: /home/mluser/app/artifacts
+                  readOnly: true
+                # Mounted at data/processed, not data/: a volume over data/
+                # would shadow data/raw, which ships in the image.
+                - name: data
+                  mountPath: /home/mluser/app/data/processed
+          volumes:
+            - name: artifacts
+              persistentVolumeClaim:
+                claimName: telco-artifacts
+            - name: data
+              persistentVolumeClaim:
+                claimName: telco-data
