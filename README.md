@@ -1,10 +1,50 @@
 # TelcoFlow — Customer Churn Prediction Platform
 
+[![ML Pipeline](https://github.com/vignesh-kumar-v/TelcoFlow-CI-CD/actions/workflows/ml-pipeline.yml/badge.svg)](https://github.com/vignesh-kumar-v/TelcoFlow-CI-CD/actions/workflows/ml-pipeline.yml)
+![tests](https://img.shields.io/badge/tests-177-brightgreen)
+![python](https://img.shields.io/badge/python-3.11-blue)
+![license](https://img.shields.io/badge/license-MIT-yellow)
+
 An end-to-end ML platform that predicts telecom customer churn. Features are
 engineered in SQL, models are compared and tuned with Optuna, runs are tracked
 and versioned in MLflow, the winner is served over FastAPI, and the whole thing
 is orchestrated with Airflow, containerised, deployable to Kubernetes, and
 exercised by GitHub Actions on every push.
+
+## Results
+
+Four models compete on test ROC-AUC over a stratified 80/10/10 split
+(4,225 train / 1,409 validation / 1,409 test). Any of them can be deployed — the
+winner's feature shape is recorded at training time and reproduced at serving.
+
+| Model | ROC-AUC | Precision | Recall | F1 |
+|---|---|---|---|---|
+| **Logistic Regression** *(deployed)* | **0.8458** | 0.508 | **0.794** | 0.619 |
+| Tuned LightGBM (Optuna, 50 trials) | 0.8436 | 0.546 | 0.765 | **0.637** |
+| LightGBM | 0.8350 | 0.773 | 0.246 | 0.373 |
+| XGBoost | 0.8310 | 0.518 | 0.770 | 0.619 |
+
+- **79.4% recall on churners** — the metric that matters when a missed churner
+  is a lost customer and a false positive costs one retention offer.
+- **Optuna tuning lifted LightGBM from 0.8350 to 0.8436**, and SQL feature
+  engineering lifted the winner from 0.8422 to **0.8458**.
+- Untuned LightGBM shows the danger of ranking on AUC alone: 0.773 precision but
+  **24.6% recall**, so it misses three churners in four at the 0.5 threshold.
+
+**Top churn drivers** (SHAP on the deployed model): tenure, contract type,
+fiber-optic internet, monthly charges, and the engineered `avg_monthly_spend`.
+
+**Sharpest segment finding** — month-to-month customers in their first six
+months on premium plans churn at **77.1%**, nearly **3× the 26.5% base rate**:
+
+| Contract | Tenure | Spend | Customers | Churn rate |
+|---|---|---|---|---|
+| Month-to-month | 0–6m | premium | 118 | **77.1%** |
+| Month-to-month | 0–6m | high | 524 | 72.0% |
+| Month-to-month | 1–2y | premium | 177 | 56.5% |
+
+A simulated retention campaign on the 585 highest-risk customers produced a
+**+11.6pp retention lift (p = 0.0035)** — see [A/B Test](#ab-test-simulation).
 
 ## Problem Statement
 
@@ -118,7 +158,9 @@ differently-computed inputs.
 
 ## Model Selection
 
-Four candidates are compared on test ROC-AUC and **any of them can be deployed**:
+Scores are in [Results](#results). The point here is that **any of the four can
+be deployed**, which requires reproducing three different feature shapes at
+serving time:
 
 | Model | Feature shape it consumes |
 |-------|--------------------------|
@@ -181,6 +223,13 @@ Retention rate           26.2%    23.4%       +2.8%   0.4301  not significant
 
 The revenue result being *non*-significant while retention is significant is the
 honest readout: a $50 offer against high-variance revenue needs a larger sample.
+Randomisation is checked too — mean predicted risk was 0.7351 (treatment) vs
+0.7347 (control), p = 0.968.
+
+**This is a simulation, not a live experiment.** The outcome model assumes the
+treatment reduces each customer's predicted churn probability by a fixed
+relative amount. It demonstrates the analysis machinery — stratification,
+significance testing, power, negative controls — not a measured business result.
 
 ## API
 
@@ -329,9 +378,10 @@ make unit-test          # no artifacts needed — runs on a cold checkout
 make integration-test   # asserts against a completed pipeline run
 ```
 
-167 tests (163 without GCP credentials, where the BigQuery live tests skip).
-Integration tests **skip** rather than fail when no pipeline has run, so a fresh
-clone is green. Notable coverage:
+**177 tests** — 34 unit, 30 Kubernetes manifest, 25 SQL, 22 A/B, 21
+orchestration, 17 BigQuery, 16 integration, 12 API. Integration tests **skip**
+rather than fail when no pipeline has run, so a fresh clone is green:
+**155 pass, 22 skip, 0 fail** with no artifacts on disk. Notable coverage:
 
 - Category codes stay stable when a scoring batch omits a category
 - The deployed model is the comparison winner (not a filtered subset's)
@@ -352,21 +402,23 @@ the run summary.
 ## Project Structure
 
 ```
-├── .github/workflows/ml-pipeline.yml
+├── .github/workflows/ml-pipeline.yml  # 4 parallel CI jobs
 ├── airflow/dags/telco_churn_dag.py    # orchestration with quality gates
 ├── k8s/                               # Deployment, Service, Job, CronJob
 ├── sql/                               # versioned cleaning + feature SQL
+├── notebooks/eda.ipynb                # exploratory analysis
 ├── src/telco_churn/
 │   ├── features.py                    # feature defs + fitted transform
 │   ├── inference.py                   # shared serving path
-│   ├── gates.py                       # promotion / drift predicates
+│   ├── gates.py                       # promotion / drift predicates (stdlib only)
 │   ├── db.py, sql_features.py         # SQL layer
 │   ├── train.py, batch_score.py       # training and batch scoring
 │   ├── tracking.py                    # MLflow
 │   ├── ab_test.py                     # experiment simulation
 │   ├── bigquery_loader.py             # warehouse path
 │   └── api.py                         # FastAPI
-├── tests/                             # 162 tests
+├── tests/                             # 177 tests
+├── Dockerfile / .dockerignore         # 1.69GB runtime image
 ├── docker-compose.yml                 # Postgres + MLflow server
 └── requirements.txt / requirements-airflow.txt
 ```
@@ -377,6 +429,27 @@ the run summary.
 — 7,043 customers, 20 features, 26.5% churn rate. The 11 records with a blank
 `TotalCharges` are all `tenure = 0` (new customers, never billed) and are
 median-imputed.
+
+## Limitations and next steps
+
+Known constraints, stated plainly:
+
+- **The dataset is a static snapshot.** There is no time dimension, so the
+  train/test split cannot be temporal. A production churn model should be
+  validated on a forward time window, since customer mix drifts.
+- **The A/B test is simulated.** Outcomes are drawn from the model's own
+  predicted probabilities, so it validates the analysis, not the intervention.
+- **Feature logic exists in three implementations** (local SQL, BigQuery SQL,
+  Python). Parity tests catch divergence, but a single source — dbt models, or
+  a feature store — would remove the duplication entirely.
+- **The artifact store is a shared filesystem.** That works on a single node;
+  a multi-node cluster needs ReadWriteMany or, better, serving pulling from the
+  MLflow registry rather than a mounted volume.
+- **Decision threshold is fixed at 0.5.** With a 2.7:1 imbalance, the operating
+  point should be chosen from the cost of a missed churner versus a wasted
+  retention offer, not left at the default.
+- **No model monitoring in production.** Drift is computed at scoring time, but
+  there is no alerting or automated retraining trigger wired to it.
 
 ## Tech Stack
 
