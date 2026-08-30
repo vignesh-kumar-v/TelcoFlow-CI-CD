@@ -1,0 +1,49 @@
+# Postgres backend for the SQL feature-engineering stage.
+#
+#   docker compose up -d
+#   export DB_URL=postgresql+psycopg2://telco:telco@localhost:5432/telco
+#   make sql-features
+#
+# The same SQL under sql/ runs unchanged against SQLite (the default) and this
+# service; only DB_URL changes.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: telco-postgres
+    environment:
+      POSTGRES_USER: telco
+      POSTGRES_PASSWORD: telco
+      POSTGRES_DB: telco
+    ports:
+      - "5432:5432"
+    volumes:
+      - telco_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telco -d telco"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Optional: MLflow tracking server backed by the same Postgres instance.
+  # Without this, tracking defaults to a local SQLite file (sqlite:///mlflow.db).
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    container_name: telco-mlflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql+psycopg2://telco:telco@postgres:5432/telco
+      --default-artifact-root /mlruns
+    ports:
+      - "5000:5000"
+    volumes:
+      - telco_mlruns:/mlruns
+
+volumes:
+  telco_pgdata:
+  telco_mlruns:
