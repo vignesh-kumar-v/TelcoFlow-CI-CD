@@ -1,48 +1,49 @@
-import pandas as pd
-import numpy as np
-from pathlib import Path
-import joblib
 import json
 from datetime import datetime
+from pathlib import Path
+
+import joblib
+import lightgbm
+import matplotlib
+import numpy as np
+import pandas as pd
 import typer
+import xgboost as xgb
 from rich.console import Console
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder
-from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, roc_auc_score
-import lightgbm
-import xgboost as xgb
-import matplotlib
+from sklearn.model_selection import train_test_split
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402
+
+from src.telco_churn.features import (  # noqa: E402
+    CONTRACT_ORDER, DROP_COLS, LINEAR, MODEL_TYPE_BY_NAME, NOMINAL_FEATURES,
+    NUMERIC_FEATURES, ORDINAL_FEATURES, TARGET, TREE_CODES, TREE_NATIVE,
+    FeaturePipeline, active_features, create_lgbm_preprocessor,
+    create_lr_preprocessor, drop_non_features, prepare_data_lgbm, prepare_data_lr,
+)
+from src.telco_churn.tracking import ExperimentTracker  # noqa: E402
 
 console = Console()
 
-DROP_COLS = ["customerID"]
-
-NOMINAL_FEATURES = [
-    "gender", "Partner", "Dependents", "PhoneService", "MultipleLines",
-    "InternetService", "OnlineSecurity", "OnlineBackup", "DeviceProtection",
-    "TechSupport", "StreamingTV", "StreamingMovies", "PaperlessBilling",
-    "PaymentMethod",
+# Re-exported so `from src.telco_churn.train import NOMINAL_FEATURES` keeps working
+# for existing callers and tests; the definitions now live in features.py.
+__all__ = [
+    "DROP_COLS", "NOMINAL_FEATURES", "ORDINAL_FEATURES", "NUMERIC_FEATURES",
+    "CONTRACT_ORDER", "create_lgbm_preprocessor", "create_lr_preprocessor",
+    "prepare_data_lgbm", "prepare_data_lr", "compute_scale_pos_weight",
 ]
-
-ORDINAL_FEATURES = ["Contract"]
-CONTRACT_ORDER = [["Month-to-month", "One year", "Two year"]]
-
-NUMERIC_FEATURES = ["SeniorCitizen", "tenure", "MonthlyCharges", "TotalCharges"]
 
 
 def load_clean_data(clean_path: Path):
     console.log(f"[blue]Loading cleaned data from {clean_path}...")
     df = pd.read_parquet(clean_path)
-    df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
-    console.log(f"[green]Loaded {len(df)} rows (dropped {DROP_COLS})")
+    console.log(f"[green]Loaded {len(df)} rows, {len(df.columns)} columns")
     return df
 
 
-def split_data(df: pd.DataFrame, target_col: str = "Churn", test_size: float = 0.2,
+def split_data(df: pd.DataFrame, target_col: str = TARGET, test_size: float = 0.2,
                val_size: float = 0.2, random_state: int = 42):
     console.log(f"[blue]Splitting data (test_size={test_size}, val_size={val_size})...")
     df_train_val, df_test = train_test_split(
@@ -54,44 +55,6 @@ def split_data(df: pd.DataFrame, target_col: str = "Churn", test_size: float = 0
     )
     console.log(f"[green]Train: {len(df_train)} | Val: {len(df_val)} | Test: {len(df_test)}")
     return df_train, df_val, df_test
-
-
-def create_lgbm_preprocessor():
-    encoder = OrdinalEncoder(
-        categories=CONTRACT_ORDER,
-        handle_unknown="use_encoded_value",
-        unknown_value=-1,
-    )
-    return encoder
-
-
-def create_lr_preprocessor():
-    transformer = ColumnTransformer(
-        transformers=[
-            ("nominal", OneHotEncoder(handle_unknown="ignore", sparse_output=False), NOMINAL_FEATURES),
-            ("ordinal", OrdinalEncoder(categories=CONTRACT_ORDER, handle_unknown="use_encoded_value", unknown_value=-1), ORDINAL_FEATURES),
-            ("numeric", "passthrough", NUMERIC_FEATURES),
-        ]
-    )
-    return transformer
-
-
-def prepare_data_lgbm(X: pd.DataFrame, encoder, fit: bool = False):
-    X = X.copy()
-    if fit:
-        X[ORDINAL_FEATURES] = encoder.fit_transform(X[ORDINAL_FEATURES])
-    else:
-        X[ORDINAL_FEATURES] = encoder.transform(X[ORDINAL_FEATURES])
-    for col in NOMINAL_FEATURES:
-        X[col] = X[col].astype("category")
-    cat_indices = [X.columns.get_loc(c) for c in NOMINAL_FEATURES + ORDINAL_FEATURES]
-    return X, cat_indices
-
-
-def prepare_data_lr(X: pd.DataFrame, transformer, fit: bool = False):
-    if fit:
-        return transformer.fit_transform(X)
-    return transformer.transform(X)
 
 
 def compute_scale_pos_weight(y):
@@ -119,10 +82,14 @@ def evaluate_model(model, X_test, y_test, model_name: str = "model"):
 
 def train_logistic_regression(X_train, y_train, X_val, y_val):
     console.log("[blue]Training Logistic Regression...")
-    model = LogisticRegression(
-        class_weight="balanced",
-        max_iter=1000,
-        random_state=42,
+    # lbfgs needs the one-hot matrix scaled to converge; without it the solver
+    # hits max_iter and warns on every run.
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    model = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(class_weight="balanced", max_iter=1000, random_state=42),
     )
     model.fit(X_train, y_train)
     return model
@@ -155,12 +122,6 @@ def train_lgbm(X_train, y_train, X_val, y_val, cat_indices, scale_pos_weight, pa
 
 def train_xgboost(X_train, y_train, X_val, y_val, scale_pos_weight):
     console.log("[blue]Training XGBoost...")
-    X_train_xgb = X_train.copy()
-    X_val_xgb = X_val.copy()
-    for col in NOMINAL_FEATURES:
-        if hasattr(X_train_xgb[col], "cat"):
-            X_train_xgb[col] = X_train_xgb[col].cat.codes
-            X_val_xgb[col] = X_val_xgb[col].cat.codes
     model = xgb.XGBClassifier(
         n_estimators=500,
         learning_rate=0.05,
@@ -173,16 +134,13 @@ def train_xgboost(X_train, y_train, X_val, y_val, scale_pos_weight):
         early_stopping_rounds=50,
         enable_categorical=False,
     )
-    model.fit(
-        X_train_xgb, y_train,
-        eval_set=[(X_val_xgb, y_val)],
-        verbose=False,
-    )
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
     console.log(f"[green]XGBoost trained with {model.best_iteration} iterations")
     return model
 
 
-def tune_lgbm_optuna(X_train, y_train, X_val, y_val, cat_indices, scale_pos_weight, n_trials=50):
+def tune_lgbm_optuna(X_train, y_train, X_val, y_val, cat_indices, scale_pos_weight,
+                     n_trials=50, tracker: "ExperimentTracker | None" = None):
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     console.log(f"[blue]Running Optuna hyperparameter tuning ({n_trials} trials)...")
@@ -198,97 +156,122 @@ def tune_lgbm_optuna(X_train, y_train, X_val, y_val, cat_indices, scale_pos_weig
             "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
         }
-        model = train_lgbm(X_train, y_train, X_val, y_val, cat_indices, scale_pos_weight, params=params)
-        y_pred_proba = model.predict_proba(X_val)[:, 1]
-        return roc_auc_score(y_val, y_pred_proba)
+        model = train_lgbm(X_train, y_train, X_val, y_val, cat_indices,
+                           scale_pos_weight, params=params)
+        val_auc = roc_auc_score(y_val, model.predict_proba(X_val)[:, 1])
+        if tracker is not None:
+            tracker.log_trial(trial.number, params, val_auc)
+        return val_auc
 
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=n_trials)
     console.log(f"[green]Best trial AUC: {study.best_value:.4f}")
     console.log(f"[green]Best params: {study.best_params}")
-    return study.best_params
+    return study.best_params, study
 
 
-def generate_shap_analysis(model, X_test, run_dir: Path, is_lgbm: bool = False):
+def _coerce_binary_shap(shap_values):
+    """SHAP returns per-class values in several shapes across versions/models."""
+    if isinstance(shap_values, list):
+        return shap_values[1] if len(shap_values) > 1 else shap_values[0]
+    values = np.asarray(shap_values)
+    if values.ndim == 3:
+        return values[:, :, 1] if values.shape[2] > 1 else values[:, :, 0]
+    return values
+
+
+def generate_shap_analysis(model, X, run_dir: Path, model_type: str,
+                           feature_names=None):
+    """Feature importance for the deployed model, whatever type it is."""
     import shap
+
     console.log("[blue]Generating SHAP feature importance...")
-    X_shap = X_test.copy()
-    X_display = X_test.copy()
-    for col in X_display.columns:
-        if hasattr(X_display[col], "cat"):
-            X_display[col] = X_display[col].cat.codes
-    if is_lgbm:
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_shap, check_additivity=False)
+
+    if model_type == LINEAR:
+        # `model` is a StandardScaler -> LogisticRegression pipeline; explain the
+        # classifier over the scaled matrix it actually sees.
+        scaler, classifier = model[0], model[-1]
+        X_scaled = scaler.transform(X)
+        explainer = shap.LinearExplainer(classifier, X_scaled)
+        shap_values = _coerce_binary_shap(explainer.shap_values(X_scaled))
+        X_display = pd.DataFrame(X_scaled, columns=feature_names)
     else:
         explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_display, check_additivity=False)
-    if isinstance(shap_values, list):
-        shap_values = shap_values[1]
-    fig, ax = plt.subplots(figsize=(10, 8))
+        X_display = X.copy()
+        for col in X_display.columns:
+            if isinstance(X_display[col].dtype, pd.CategoricalDtype):
+                X_display[col] = X_display[col].cat.codes
+        source = X if model_type == TREE_NATIVE else X_display
+        shap_values = _coerce_binary_shap(
+            explainer.shap_values(source, check_additivity=False)
+        )
+
+    plt.figure(figsize=(10, 8))
     shap.summary_plot(shap_values, X_display, show=False)
     plt.tight_layout()
     plt.savefig(run_dir / "shap_summary.png", dpi=150)
     plt.close("all")
-    console.log(f"[green]SHAP summary plot saved")
+    console.log("[green]SHAP summary plot saved")
+
     mean_abs_shap = np.abs(shap_values).mean(axis=0)
     importance = dict(zip(X_display.columns.tolist(), mean_abs_shap.tolist()))
-    importance = dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
-    return importance
+    return dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
 
 
 def compute_feature_stats(X: pd.DataFrame):
-    stats = {}
-    for col in NUMERIC_FEATURES:
-        if col in X.columns:
-            stats[col] = {
-                "mean": float(X[col].mean()),
-                "std": float(X[col].std()),
-                "min": float(X[col].min()),
-                "max": float(X[col].max()),
-            }
-    return stats
+    _, _, numeric = active_features(X)
+    return {
+        col: {
+            "mean": float(X[col].mean()),
+            "std": float(X[col].std()),
+            "min": float(X[col].min()),
+            "max": float(X[col].max()),
+        }
+        for col in numeric
+    }
 
 
 def compute_categorical_distributions(X: pd.DataFrame):
+    nominal, ordinal, _ = active_features(X)
     distributions = {}
-    for col in NOMINAL_FEATURES + ORDINAL_FEATURES:
-        if col in X.columns:
-            dist = X[col].value_counts(normalize=True)
-            distributions[col] = {str(k): float(v) for k, v in dist.items()}
+    for col in nominal + ordinal:
+        dist = X[col].value_counts(normalize=True)
+        distributions[col] = {str(k): float(v) for k, v in dist.items()}
     return distributions
 
 
-def save_artifacts(model, preprocessor, metrics: dict, df_train: pd.DataFrame,
-                   artifacts_dir: Path, model_comparison: dict = None,
-                   shap_importance: dict = None):
+def save_artifacts(model, pipeline: FeaturePipeline, metrics: dict, df_train: pd.DataFrame,
+                   artifacts_dir: Path, model_name: str, model_type: str,
+                   model_comparison: dict = None, shap_importance: dict = None):
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = artifacts_dir / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
     console.log(f"[blue]Saving artifacts to {run_dir}...")
 
     joblib.dump(model, run_dir / "model.joblib")
-    joblib.dump(preprocessor, run_dir / "preprocessor.joblib")
+    joblib.dump(pipeline, run_dir / "preprocessor.joblib")
 
-    X_train = df_train.drop(columns=["Churn"], errors="ignore")
-    feature_stats = compute_feature_stats(X_train)
-    categorical_distributions = compute_categorical_distributions(X_train)
+    X_train = drop_non_features(df_train)
+    nominal, ordinal, numeric = active_features(X_train)
 
     train_info = {
         "n_samples": len(df_train),
         "n_features": len(X_train.columns),
         "feature_names": X_train.columns.tolist(),
-        "numeric_features": NUMERIC_FEATURES,
-        "categorical_features": NOMINAL_FEATURES + ORDINAL_FEATURES,
+        "numeric_features": numeric,
+        "categorical_features": nominal + ordinal,
         "train_date": timestamp,
-        "feature_stats": feature_stats,
-        "categorical_distributions": categorical_distributions,
+        # Recorded so serving transforms features the way this model was trained.
+        "model_name": model_name,
+        "model_type": model_type,
+        "feature_stats": compute_feature_stats(X_train),
+        "categorical_distributions": compute_categorical_distributions(X_train),
     }
     with open(run_dir / "train_info.json", "w") as f:
         json.dump(train_info, f, indent=2)
 
     if shap_importance:
-        metrics["shap_feature_importance"] = shap_importance
+        metrics = {**metrics, "shap_feature_importance": shap_importance}
     with open(run_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
 
@@ -296,98 +279,139 @@ def save_artifacts(model, preprocessor, metrics: dict, df_train: pd.DataFrame,
         with open(run_dir / "model_comparison.json", "w") as f:
             json.dump(model_comparison, f, indent=2)
 
-    console.log(f"[green]Artifacts saved!")
+    console.log("[green]Artifacts saved!")
     return run_dir
+
+
+def save_scoring_batch(df_test: pd.DataFrame, scoring_path: Path):
+    """Persist the held-out test split as the batch-scoring input.
+
+    Scoring the training data would make drift detection meaningless, since the
+    baseline in train_info.json is computed from that same data.
+    """
+    scoring_path.parent.mkdir(parents=True, exist_ok=True)
+    df_test.to_parquet(scoring_path, index=False)
+    console.log(f"[green]Saved {len(df_test)} held-out rows to {scoring_path}")
 
 
 def main(
     clean_path: Path = Path.cwd() / "data" / "processed" / "cleaned_data.parquet",
     artifacts_dir: Path = Path.cwd() / "artifacts",
+    scoring_path: Path = Path.cwd() / "data" / "processed" / "scoring_batch.parquet",
     random_state: int = 42,
     skip_tuning: bool = typer.Option(False, "--skip-tuning", help="Skip Optuna hyperparameter tuning"),
     n_trials: int = typer.Option(50, "--n-trials", help="Number of Optuna trials"),
+    track: bool = typer.Option(True, "--track/--no-track", help="Log the run to MLflow"),
+    register: bool = typer.Option(True, "--register/--no-register", help="Register the winner in the MLflow registry"),
 ):
     console.rule("[bold magenta]Telco Churn: Training Pipeline")
 
     df = load_clean_data(clean_path)
     df_train, df_val, df_test = split_data(df, random_state=random_state)
 
-    X_train = df_train.drop(columns=["Churn"])
-    y_train = df_train["Churn"]
-    X_val = df_val.drop(columns=["Churn"])
-    y_val = df_val["Churn"]
-    X_test = df_test.drop(columns=["Churn"])
-    y_test = df_test["Churn"]
+    X_train_raw = drop_non_features(df_train)
+    X_val_raw = drop_non_features(df_val)
+    X_test_raw = drop_non_features(df_test)
+    y_train, y_val, y_test = df_train[TARGET], df_val[TARGET], df_test[TARGET]
 
     spw = compute_scale_pos_weight(y_train)
     console.log(f"[blue]scale_pos_weight: {spw:.2f}")
 
-    lgbm_encoder = create_lgbm_preprocessor()
-    X_train_lgbm, cat_indices = prepare_data_lgbm(X_train, lgbm_encoder, fit=True)
-    X_val_lgbm, _ = prepare_data_lgbm(X_val, lgbm_encoder)
-    X_test_lgbm, _ = prepare_data_lgbm(X_test, lgbm_encoder)
+    # One fitted pipeline serves every model shape.
+    pipeline = FeaturePipeline().fit(X_train_raw)
+    cat_indices = pipeline.cat_indices
 
-    lr_transformer = create_lr_preprocessor()
-    X_train_lr = prepare_data_lr(X_train, lr_transformer, fit=True)
-    X_val_lr = prepare_data_lr(X_val, lr_transformer)
-    X_test_lr = prepare_data_lr(X_test, lr_transformer)
+    X_train_tree = pipeline.transform_tree_native(X_train_raw)
+    X_val_tree = pipeline.transform_tree_native(X_val_raw)
+    X_test_tree = pipeline.transform_tree_native(X_test_raw)
 
-    model_comparison = {}
+    X_train_codes = pipeline.transform_tree_codes(X_train_raw)
+    X_val_codes = pipeline.transform_tree_codes(X_val_raw)
+    X_test_codes = pipeline.transform_tree_codes(X_test_raw)
 
-    lr_model = train_logistic_regression(X_train_lr, y_train, X_val_lr, y_val)
-    lr_metrics = evaluate_model(lr_model, X_test_lr, y_test, "Logistic Regression")
-    model_comparison["logistic_regression"] = lr_metrics
+    X_train_lin = pipeline.transform_linear(X_train_raw)
+    X_val_lin = pipeline.transform_linear(X_val_raw)
+    X_test_lin = pipeline.transform_linear(X_test_raw)
 
-    lgbm_model = train_lgbm(X_train_lgbm, y_train, X_val_lgbm, y_val, cat_indices, spw)
-    lgbm_metrics = evaluate_model(lgbm_model, X_test_lgbm, y_test, "LightGBM")
-    model_comparison["lightgbm"] = lgbm_metrics
+    tracker = ExperimentTracker(enabled=track)
+    tracker.start_run(
+        params={
+            "n_train": len(df_train), "n_val": len(df_val), "n_test": len(df_test),
+            "scale_pos_weight": round(float(spw), 4),
+            "random_state": random_state,
+            "tuning": "optuna" if not skip_tuning else "none",
+            "n_trials": 0 if skip_tuning else n_trials,
+            "n_features": X_train_raw.shape[1],
+        }
+    )
 
-    xgb_model = train_xgboost(X_train_lgbm, y_train, X_val_lgbm, y_val, spw)
-    X_test_xgb = X_test_lgbm.copy()
-    for col in NOMINAL_FEATURES:
-        if hasattr(X_test_xgb[col], "cat"):
-            X_test_xgb[col] = X_test_xgb[col].cat.codes
-    xgb_metrics = evaluate_model(xgb_model, X_test_xgb, y_test, "XGBoost")
-    model_comparison["xgboost"] = xgb_metrics
+    # Each entry: (model, metrics, test matrix used for SHAP, feature names)
+    candidates = {}
+
+    lr_model = train_logistic_regression(X_train_lin, y_train, X_val_lin, y_val)
+    lr_metrics = evaluate_model(lr_model, X_test_lin, y_test, "Logistic Regression")
+    candidates["logistic_regression"] = (
+        lr_model, lr_metrics, X_test_lin,
+        pipeline.lr_transformer.get_feature_names_out().tolist(),
+    )
+
+    lgbm_model = train_lgbm(X_train_tree, y_train, X_val_tree, y_val, cat_indices, spw)
+    lgbm_metrics = evaluate_model(lgbm_model, X_test_tree, y_test, "LightGBM")
+    candidates["lightgbm"] = (lgbm_model, lgbm_metrics, X_test_tree, None)
+
+    xgb_model = train_xgboost(X_train_codes, y_train, X_val_codes, y_val, spw)
+    xgb_metrics = evaluate_model(xgb_model, X_test_codes, y_test, "XGBoost")
+    candidates["xgboost"] = (xgb_model, xgb_metrics, X_test_codes, None)
 
     if not skip_tuning:
-        best_params = tune_lgbm_optuna(X_train_lgbm, y_train, X_val_lgbm, y_val, cat_indices, spw, n_trials=n_trials)
-        tuned_model = train_lgbm(X_train_lgbm, y_train, X_val_lgbm, y_val, cat_indices, spw, params=best_params)
-        tuned_metrics = evaluate_model(tuned_model, X_test_lgbm, y_test, "Tuned LightGBM")
-        model_comparison["tuned_lightgbm"] = tuned_metrics
+        best_params, study = tune_lgbm_optuna(
+            X_train_tree, y_train, X_val_tree, y_val, cat_indices, spw,
+            n_trials=n_trials, tracker=tracker,
+        )
+        tuned_model = train_lgbm(X_train_tree, y_train, X_val_tree, y_val,
+                                 cat_indices, spw, params=best_params)
+        tuned_metrics = evaluate_model(tuned_model, X_test_tree, y_test, "Tuned LightGBM")
+        candidates["tuned_lightgbm"] = (tuned_model, tuned_metrics, X_test_tree, None)
+        tracker.log_params({f"best_{k}": v for k, v in best_params.items()})
     else:
         console.log("[yellow]Skipping Optuna tuning (--skip-tuning)")
-        tuned_model = None
-        tuned_metrics = None
 
-    all_candidates = {
-        "logistic_regression": (lr_model, lr_metrics),
-        "lightgbm": (lgbm_model, lgbm_metrics),
-        "xgboost": (xgb_model, xgb_metrics),
-    }
-    if tuned_model is not None:
-        all_candidates["tuned_lightgbm"] = (tuned_model, tuned_metrics)
+    model_comparison = {name: m for name, (_, m, _, _) in candidates.items()}
+    tracker.log_model_comparison(model_comparison)
 
-    overall_best = max(all_candidates, key=lambda k: all_candidates[k][1]["roc_auc"])
-    console.log(f"[blue]Overall best model: {overall_best} (AUC={all_candidates[overall_best][1]['roc_auc']:.4f})")
+    # Every candidate is deployable: the feature pipeline can reproduce whichever
+    # shape the winner needs, so selection is purely on ROC-AUC.
+    best_name = max(candidates, key=lambda k: candidates[k][1]["roc_auc"])
+    best_model, best_metrics, best_X_test, best_feature_names = candidates[best_name]
+    best_type = MODEL_TYPE_BY_NAME[best_name]
+    console.log(
+        f"[bold green]Best model: {best_name} "
+        f"(AUC={best_metrics['roc_auc']:.4f}, type={best_type}) — deploying this one"
+    )
 
-    tree_candidates = {k: v for k, v in all_candidates.items() if k in ("lightgbm", "tuned_lightgbm", "xgboost")}
-    best_name = max(tree_candidates, key=lambda k: tree_candidates[k][1]["roc_auc"])
-    best_model, best_metrics = tree_candidates[best_name]
-    console.log(f"[bold green]Deployed model: {best_name} (AUC={best_metrics['roc_auc']:.4f})")
+    run_dir = save_artifacts(
+        best_model, pipeline, best_metrics, df_train, artifacts_dir,
+        model_name=best_name, model_type=best_type,
+        model_comparison=model_comparison,
+    )
 
-    run_dir = save_artifacts(best_model, lgbm_encoder, best_metrics, df_train, artifacts_dir,
-                             model_comparison=model_comparison, shap_importance=None)
-
-    shap_X = X_test_xgb if best_name == "xgboost" else X_test_lgbm
-    is_lgbm = best_name in ("lightgbm", "tuned_lightgbm")
-    shap_importance = generate_shap_analysis(best_model, shap_X, run_dir, is_lgbm=is_lgbm)
+    shap_importance = generate_shap_analysis(
+        best_model, best_X_test, run_dir, best_type, feature_names=best_feature_names
+    )
     metrics_path = run_dir / "metrics.json"
     with open(metrics_path) as f:
         metrics_out = json.load(f)
     metrics_out["shap_feature_importance"] = shap_importance
     with open(metrics_path, "w") as f:
         json.dump(metrics_out, f, indent=2)
+
+    save_scoring_batch(df_test, scoring_path)
+
+    tracker.log_best_model(
+        model=best_model, model_name=best_name, model_type=best_type,
+        metrics=best_metrics, run_dir=run_dir, register=register,
+    )
+    tracker.end_run()
 
     console.rule("[bold]Training completed successfully!")
 

@@ -1,162 +1,213 @@
-# src/telco_churn/api.py
-"""
-FastAPI endpoint for real-time churn predictions
-What it does: Accepts customer features, returns churn probability
-Why it matters: Online inference for immediate decisions (e.g., during customer service call)
+"""FastAPI endpoint for real-time churn predictions.
+
+Online inference for immediate decisions — e.g. deciding whether to offer a
+retention discount while a customer is still on the phone.
 """
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from pathlib import Path
-import joblib
-import pandas as pd
+from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
 import typer
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 from rich.console import Console
 
-from src.telco_churn.train import (
-    prepare_data_lgbm, DROP_COLS, NOMINAL_FEATURES, ORDINAL_FEATURES,
-)
+from src.telco_churn.inference import LoadedModel, risk_category
 
-app = FastAPI(title="Telco Churn Prediction API", version="1.0.0")
 console = Console()
 
-# Global variables for model and preprocessor
-model = None
-preprocessor = None
-latest_run_dir = None
+# Populated during startup; None means the app is up but has no model to serve.
+loaded_model: LoadedModel | None = None
+
+
+def _load_model() -> "LoadedModel | None":
+    """Load the newest model, returning None when none exists yet.
+
+    Retried on demand rather than only at startup: in Kubernetes the API pods
+    come up in parallel with the training Job, so the artifact volume is often
+    still empty at boot. Without the retry those pods would never serve until
+    someone restarted them.
+    """
+    global loaded_model
+    if loaded_model is not None:
+        return loaded_model
+    try:
+        loaded_model = LoadedModel.load_latest(Path.cwd() / "artifacts")
+        console.log(
+            f"[green]Model loaded from {loaded_model.version} "
+            f"({loaded_model.model_name}, {loaded_model.model_type})"
+        )
+    except FileNotFoundError as exc:
+        loaded_model = None
+        console.log(f"[yellow]No model available yet: {exc}")
+    return loaded_model
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load the model at startup rather than on every request.
+
+    A missing model is not fatal: the app still starts so the readiness probe
+    can hold the pod out of the load balancer, instead of crash-looping.
+    """
+    global loaded_model
+    console.log("[blue]Loading latest model...")
+    _load_model()
+    yield
+    loaded_model = None
+
+
+app = FastAPI(title="Telco Churn Prediction API", version="1.0.0", lifespan=lifespan)
 
 
 class CustomerFeatures(BaseModel):
-    """Pydantic model for input validation
+    """Input contract for a single prediction.
 
-    Why: Automatically validates data types, ranges, and required fields
-    Prevents bad data from crashing the API
+    Pydantic validates types and ranges before anything reaches the model, so
+    malformed requests fail with a 422 instead of an opaque 500.
     """
-    customerID: str = Field(..., example="1234-ABCD")
-    gender: str = Field(..., example="Female")
-    SeniorCitizen: int = Field(..., ge=0, le=1, example=0)
-    Partner: str = Field(..., example="Yes")
-    Dependents: str = Field(..., example="No")
-    tenure: int = Field(..., ge=0, example=12)
-    PhoneService: str = Field(..., example="Yes")
-    MultipleLines: str = Field(..., example="No")
-    InternetService: str = Field(..., example="Fiber optic")
-    OnlineSecurity: str = Field(..., example="No")
-    OnlineBackup: str = Field(..., example="Yes")
-    DeviceProtection: str = Field(..., example="No")
-    TechSupport: str = Field(..., example="No")
-    StreamingTV: str = Field(..., example="Yes")
-    StreamingMovies: str = Field(..., example="No")
-    Contract: str = Field(..., example="Month-to-month")
-    PaperlessBilling: str = Field(..., example="Yes")
-    PaymentMethod: str = Field(..., example="Electronic check")
-    MonthlyCharges: float = Field(..., ge=0, example=70.35)
-    TotalCharges: float = Field(..., ge=0, example=820.5)
+
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "customerID": "7590-VHVEG", "gender": "Female", "SeniorCitizen": 0,
+            "Partner": "Yes", "Dependents": "No", "tenure": 1,
+            "PhoneService": "No", "MultipleLines": "No phone service",
+            "InternetService": "DSL", "OnlineSecurity": "No", "OnlineBackup": "Yes",
+            "DeviceProtection": "No", "TechSupport": "No", "StreamingTV": "No",
+            "StreamingMovies": "No", "Contract": "Month-to-month",
+            "PaperlessBilling": "Yes", "PaymentMethod": "Electronic check",
+            "MonthlyCharges": 29.85, "TotalCharges": 29.85,
+        }
+    })
+
+    customerID: str
+    gender: str
+    SeniorCitizen: int = Field(..., ge=0, le=1)
+    Partner: str
+    Dependents: str
+    tenure: int = Field(..., ge=0)
+    PhoneService: str
+    MultipleLines: str
+    InternetService: str
+    OnlineSecurity: str
+    OnlineBackup: str
+    DeviceProtection: str
+    TechSupport: str
+    StreamingTV: str
+    StreamingMovies: str
+    Contract: str
+    PaperlessBilling: str
+    PaymentMethod: str
+    MonthlyCharges: float = Field(..., ge=0)
+    TotalCharges: float = Field(..., ge=0)
 
 
-@app.on_event("startup")
-def load_model():
-    """Load latest model on startup
+class PredictionResponse(BaseModel):
+    customerID: str
+    churn_probability: float
+    risk_category: str
+    model_version: str
+    timestamp: str
 
-    Why: Model loads once when API starts, not on every request
-    Makes API responses fast (<100ms)
-    """
-    global model, preprocessor, latest_run_dir
 
-    console.log("[blue]Loading latest model...")
-    artifacts_dir = Path.cwd() / "artifacts"
-
-    # Get latest run
-    runs = [d for d in artifacts_dir.iterdir() if d.is_dir() and d.name[0].isdigit()]
-    if not runs:
-        raise RuntimeError("No trained models found")
-
-    latest_run_dir = sorted(runs, key=lambda x: x.name, reverse=True)[0]
-
-    # Load model and preprocessor
-    model = joblib.load(latest_run_dir / "model.joblib")
-    preprocessor = joblib.load(latest_run_dir / "preprocessor.joblib")
-
-    console.log(f"[green]Model loaded from {latest_run_dir.name}")
+def _require_model() -> LoadedModel:
+    model = _load_model()
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="No model available. Run `make train` to produce one.",
+        )
+    return model
 
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint
+    """Liveness probe: is the process up?
 
-    Why: Load balancers and monitoring tools use this to check if API is alive
+    Always 200 while the app is running. Deliberately does not consider the
+    model — a liveness failure restarts the container, and restarting will not
+    conjure a model that has not been trained yet.
     """
+    model = loaded_model
     return {
         "status": "healthy",
-        "model_version": latest_run_dir.name if latest_run_dir else "none",
-        "timestamp": datetime.now().isoformat()
+        "model_loaded": model is not None,
+        "model_version": model.version if model else None,
+        "model_name": model.model_name if model else None,
+        "timestamp": datetime.now().isoformat(),
     }
 
 
-@app.post("/predict", response_model=dict)
+@app.get("/ready")
+def readiness_check():
+    """Readiness probe: can this pod actually serve predictions?
+
+    Returns 503 without a model, so Kubernetes keeps the pod out of the Service
+    endpoints instead of routing traffic that can only fail. Probes look at the
+    status code, not the body — a 200 saying "no_model" would still be admitted.
+    """
+    model = _load_model()
+    if model is None:
+        raise HTTPException(status_code=503, detail="No model loaded yet")
+    return {
+        "status": "ready",
+        "model_version": model.version,
+        "model_name": model.model_name,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.post("/predict", response_model=PredictionResponse)
 def predict_churn(features: CustomerFeatures):
-    """
-    Predict churn probability for a single customer
+    """Churn probability for a single customer.
 
-    Why: Real-time inference for immediate actions (e.g., offer retention discount during call)
+    Feature transformation is driven by the model type recorded at training
+    time, so this path is identical to batch scoring regardless of which
+    algorithm won.
     """
+    model = _require_model()
     try:
-        # Convert Pydantic model to DataFrame
-        df = pd.DataFrame([features.dict()])
+        df = pd.DataFrame([features.model_dump()])
+        probability = float(model.predict_proba(df)[0])
+    except Exception as exc:
+        console.log(f"[red]Prediction failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}")
 
-        df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
-
-        # Apply preprocessing (same as training!)
-        X_processed, _ = prepare_data_lgbm(df, preprocessor)
-
-        # Get prediction probability
-        probability = model.predict_proba(X_processed)[0, 1]
-
-        return {
-            "customerID": features.customerID,
-            "churn_probability": float(probability),
-            "risk_category": "High" if probability > 0.6 else "Medium" if probability > 0.4 else "Low",
-            "timestamp": datetime.now().isoformat()
-        }
-
-    except Exception as e:
-        # Log error and return meaningful message
-        console.log(f"[red]Prediction failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+    return PredictionResponse(
+        customerID=features.customerID,
+        churn_probability=probability,
+        risk_category=risk_category(probability),
+        model_version=model.version,
+        timestamp=datetime.now().isoformat(),
+    )
 
 
 @app.get("/model/info")
 def model_info():
-    """Get model metadata
-
-    Why: Helps debug which model version is running in production
-    """
-    if not latest_run_dir:
-        return {"error": "No model loaded"}
-
-    metrics_path = latest_run_dir / "metrics.json"
-    if metrics_path.exists():
-        metrics = pd.read_json(metrics_path, typ="series").to_dict()
-    else:
-        metrics = {}
-
+    """Which model version is live, and how it scored — useful when debugging prod."""
+    model = _require_model()
+    metrics = model.metrics()
     return {
-        "model_version": latest_run_dir.name,
-        "metrics": metrics,
-        "loaded_at": datetime.now().isoformat()
+        "model_version": model.version,
+        "model_name": model.model_name,
+        "model_type": model.model_type,
+        "n_training_samples": model.train_info.get("n_samples"),
+        "features": model.train_info.get("feature_names", []),
+        "metrics": {k: v for k, v in metrics.items() if k != "shap_feature_importance"},
+        "top_features": list(metrics.get("shap_feature_importance", {}))[:10],
+        "loaded_at": datetime.now().isoformat(),
     }
 
 
-def main():
-    """Launch API server"""
+def main(host: str = "0.0.0.0", port: int = 8000):
+    """Launch the API server."""
     import uvicorn
 
     console.rule("[bold magenta]Starting Telco Churn Prediction API")
-    console.log(f"[blue]Model: {latest_run_dir.name if latest_run_dir else 'None'}")
-    console.log(f"[blue]API docs: http://localhost:8000/docs")
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    console.log(f"[blue]API docs: http://localhost:{port}/docs")
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
