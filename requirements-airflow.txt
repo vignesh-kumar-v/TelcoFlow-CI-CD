@@ -1,0 +1,19 @@
+# Airflow is installed into its own environment.
+#
+# It pins transitive dependencies aggressively and would downgrade the pinned
+# versions in requirements.txt, so the scheduler gets a separate venv and the
+# DAG shells out to the project venv for the ML steps.
+#
+# Install with Airflow's official constraints file, which is the only supported
+# way to get a reproducible Airflow environment:
+#
+#   python -m venv .venv-airflow
+#   .venv-airflow/bin/pip install -r requirements-airflow.txt \
+#     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.3/constraints-3.11.txt"
+#
+#   export AIRFLOW_HOME=$(pwd)/airflow
+#   .venv-airflow/bin/airflow standalone
+#
+# Or use `make airflow-install` / `make airflow-run`.
+
+apache-airflow==2.10.3
