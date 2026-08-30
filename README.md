@@ -1,269 +1,390 @@
-# TelcoFlow — Customer Churn Prediction Pipeline
+# TelcoFlow — Customer Churn Prediction Platform
 
-An end-to-end machine learning pipeline that predicts customer churn for a telecom provider. Compares Logistic Regression, LightGBM, and XGBoost models with Optuna hyperparameter tuning, SHAP explainability, and data drift detection. Built with FastAPI, containerized with Docker, orchestrated via Make, and automated through GitHub Actions CI/CD.
+An end-to-end ML platform that predicts telecom customer churn. Features are
+engineered in SQL, models are compared and tuned with Optuna, runs are tracked
+and versioned in MLflow, the winner is served over FastAPI, and the whole thing
+is orchestrated with Airflow, containerised, deployable to Kubernetes, and
+exercised by GitHub Actions on every push.
 
 ## Problem Statement
 
-Customer churn costs telecom companies billions annually. This project builds a reproducible ML pipeline that ingests raw customer data, validates and cleans it, trains and compares multiple classifiers, generates batch predictions with churn probabilities, and monitors for data drift — all runnable with a single command.
+Customer churn costs telecom companies billions annually. This project builds a
+reproducible pipeline that ingests raw customer records into a database,
+engineers features in SQL, trains and compares multiple classifiers, serves
+predictions in batch and in real time, watches for data drift, and closes the
+loop by measuring whether acting on those predictions actually retains anyone.
 
-## Project Structure
-
-```
-TelcoFlow-CI-CD/
-├── .github/workflows/
-│   └── ml-pipeline.yml           # CI/CD: validate → train → score → test
-├── Dockerfile                    # Multi-stage Docker build
-├── Makefile                      # Pipeline orchestration
-├── requirements.txt              # Pinned Python dependencies
-├── data/
-│   └── raw/
-│       └── Telco-Customer-Churn.csv
-├── notebooks/
-│   └── eda.ipynb                 # Exploratory Data Analysis notebook
-├── src/
-│   ├── __init__.py
-│   └── telco_churn/
-│       ├── __init__.py
-│       ├── validate_and_clean.py # Stage 1: Schema validation & data cleaning
-│       ├── train.py              # Stage 2: Multi-model training, Optuna tuning & SHAP
-│       ├── batch_score.py        # Stage 3: Batch inference & drift detection
-│       └── api.py                # FastAPI real-time prediction endpoint
-└── tests/
-    ├── __init__.py
-    ├── test_pipeline.py          # Integration tests
-    └── test_unit.py              # Unit tests
-```
-
-**Generated at runtime (gitignored):**
-```
-├── data/processed/               # Cleaned parquet data
-├── artifacts/                    # Timestamped model artifacts
-│   └── <timestamp>/
-│       ├── model.joblib          # Best model
-│       ├── preprocessor.joblib   # Fitted preprocessor
-│       ├── train_info.json       # Feature stats & categorical distributions
-│       ├── metrics.json          # Best model metrics + SHAP importance
-│       ├── model_comparison.json # All models' metrics
-│       └── shap_summary.png     # SHAP feature importance plot
-├── outputs/                      # Batch predictions (parquet + csv)
-└── reports/                      # Drift analysis reports (json)
-```
-
-## Pipeline Architecture
+## Architecture
 
 ```
-┌──────────────┐     ┌──────────────┐     ┌───────────────────┐     ┌──────────┐
-│  Raw CSV     │────>│  Validate &  │────>│  Train & Compare  │────>│  Batch   │
-│  (7,043 rows)│     │  Clean       │     │  LR/LGBM/XGB/Tuned│     │  Score   │
-└──────────────┘     └──────┬───────┘     └───────┬───────────┘     └────┬─────┘
-                            │                     │                      │
-                     cleaned_data.parquet   model.joblib           predictions.csv
-                                            model_comparison.json  drift_report.json
-                                            shap_summary.png
-```
+                     ┌──────────────────────────────────────────┐
+  Raw CSV ─────────> │ SQL layer  (SQLite / Postgres / BigQuery) │
+                     │  01_clean_customers.sql                  │
+                     │  02_feature_engineering.sql              │
+                     │  03_churn_analytics.sql                  │
+                     └─────────────────┬────────────────────────┘
+                                       │ cleaned_data.parquet
+                                       ▼
+                     ┌──────────────────────────────────────────┐
+                     │ Train: LR / LightGBM / XGBoost / Tuned    │───> MLflow
+                     │ Optuna tuning · SHAP · best model wins    │     tracking
+                     └─────────────────┬────────────────────────┘     + registry
+                                       │
+                     artifacts/<ts>/   │   data/processed/scoring_batch.parquet
+                       model.joblib    │            (held-out split)
+                       preprocessor    │
+                       train_info.json ▼
+              ┌────────────────────────┴───────────────────┐
+              ▼                                            ▼
+   ┌─────────────────────┐                    ┌───────────────────────┐
+   │ Batch scoring       │                    │ FastAPI  /predict     │
+   │ + drift detection   │                    │ real-time inference   │
+   └──────────┬──────────┘                    └───────────────────────┘
+              │ predictions
+              ▼
+   ┌─────────────────────┐
+   │ A/B test simulation │  did contacting them actually help?
+   └─────────────────────┘
 
-| Stage | Script | What It Does |
-|-------|--------|--------------|
-| **Validate & Clean** | `validate_and_clean.py` | Schema validation against 21 expected columns, `TotalCharges` type coercion, median imputation for missing values, binary target encoding (`Yes/No` → `1/0`) |
-| **Train** | `train.py` | Stratified 80/10/10 split, proper categorical encoding (OneHot for LR, native category for LGBM), class imbalance handling, multi-model comparison (LR, LightGBM, XGBoost, Tuned LightGBM), Optuna hyperparameter tuning, SHAP feature importance |
-| **Batch Score** | `batch_score.py` | Loads best model, generates churn probabilities, outputs predictions in Parquet & CSV, runs numeric + categorical drift detection (mean/std percentage thresholds + Total Variation Distance) |
+  Orchestration: Airflow DAG with quality gates   Deployment: Docker / Kubernetes
+```
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/vignesh-kumar-v/TelcoFlow-CI-CD.git
 cd TelcoFlow-CI-CD
 
-# Setup
-python -m venv venv
-source venv/bin/activate
+python -m venv venv && source venv/bin/activate
 make install
 
-# Run the full pipeline
-make validate
-make train         # Full training with Optuna tuning (50 trials)
-make score
-
-# Or run without tuning (faster)
-make train-quick
-
-# Run tests
+make pipeline        # SQL features -> train -> score -> A/B test
 make test
-make unit-test
-
-# Clean bytecode
-make clean
 ```
 
-## Model Comparison
+`make help` lists every target.
 
-The training pipeline automatically compares 4 models and selects the best by ROC-AUC:
+## Pipeline Stages
 
-| Model | Description |
-|-------|-------------|
-| **Logistic Regression** | Baseline with balanced class weights |
-| **LightGBM** | Gradient boosted trees with native categorical handling |
-| **XGBoost** | Gradient boosted trees with encoded categoricals |
-| **Tuned LightGBM** | LightGBM with Optuna-optimized hyperparameters |
+| Stage | Command | What it does |
+|-------|---------|--------------|
+| **SQL features** | `make sql-features` | Loads raw records into the DB, cleans and derives features in versioned SQL, exports to parquet |
+| **Validate** (alt) | `make validate` | Pure-pandas cleaning path, no database required |
+| **Train** | `make train` | Compares 4 models, tunes with Optuna, runs SHAP, logs to MLflow, registers the winner |
+| **Score** | `make score` | Scores the held-out batch, writes predictions and a drift report |
+| **A/B test** | `make ab-test` | Simulates a retention campaign and tests it for significance |
+| **Serve** | `make api` | FastAPI real-time predictions on port 8000 |
 
-## Feature Importance
+## SQL Feature Engineering
 
-SHAP (SHapley Additive exPlanations) analysis runs on the best tree-based model, producing:
-- `shap_summary.png` — beeswarm plot showing feature impact on predictions
-- `shap_feature_importance` in `metrics.json` — ranked mean absolute SHAP values
+Cleaning and feature derivation live in `sql/`, not in pandas. The backend is
+chosen by one environment variable — the same SQL runs on both:
 
-## EDA Notebook
+```bash
+make sql-features                                    # SQLite (default)
 
-`notebooks/eda.ipynb` provides exploratory analysis including:
-- Dataset overview and missing value analysis
-- Class distribution visualization (26.5% churn rate)
-- Numeric feature distributions by churn status
-- Categorical feature churn rate analysis
-- Correlation analysis with point-biserial correlations
+docker compose up -d                                 # or Postgres
+export DB_URL=postgresql+psycopg2://telco:telco@localhost:5432/telco
+make sql-features
+```
+
+Derived features:
+
+| Feature | Definition | Why |
+|---------|-----------|-----|
+| `num_addon_services` | Count of the 6 optional services taken | Churn concentrates among customers paying a lot for very little |
+| `avg_monthly_spend` | `TotalCharges / tenure` | Lifetime billing rate, which differs from the current price after any repricing |
+| `charges_ratio` | `MonthlyCharges / avg_monthly_spend` | Above 1 means a recent price increase — a classic churn trigger |
+| `tenure_bucket` | 0-6m / 6-12m / 1-2y / 2-4y / 4y+ | Churn risk is heavily front-loaded |
+| `spend_bucket` | low / medium / high / premium | Price tier |
+
+`03_churn_analytics.sql` aggregates churn by segment. The result is a real
+finding, not decoration — the worst segment churns at nearly 3× the base rate:
+
+| Contract | Tenure | Spend | Customers | Churn rate |
+|---|---|---|---|---|
+| Month-to-month | 0-6m | premium | 118 | **77.1%** |
+| Month-to-month | 0-6m | high | 524 | 72.0% |
+| Month-to-month | 1-2y | premium | 177 | 56.5% |
+
+*(base rate across all customers: 26.5%)*
+
+**Training/serving parity.** Training features are built in the warehouse, but
+an API request never passes through it, so the same derivations exist in Python
+(`features.compute_engineered_features`). `tests/test_sql.py` asserts the two
+implementations agree row-for-row across all 7,043 customers — divergence there
+would be training/serving skew, where the model scores live traffic on
+differently-computed inputs.
+
+## Model Selection
+
+Four candidates are compared on test ROC-AUC and **any of them can be deployed**:
+
+| Model | Feature shape it consumes |
+|-------|--------------------------|
+| Logistic Regression | Dense one-hot matrix (standardised) |
+| LightGBM | Native pandas `category` columns |
+| XGBoost | Integer category codes |
+| Tuned LightGBM | Native categoricals, Optuna-optimised |
+
+Training records which shape the winner needs in `train_info.json`, and both
+serving paths transform features accordingly. Category levels are pinned at fit
+time, so a scoring batch that happens to omit a category cannot silently shift
+every remaining code.
+
+## Experiment Tracking
+
+Every run logs parameters, per-model metrics, each Optuna trial (as a nested
+run) and artifacts to MLflow; the winner is registered as a new version of
+`telco-churn-classifier`.
+
+```bash
+make mlflow-ui     # http://localhost:5000
+```
+
+Tracking is best-effort: if MLflow is unavailable the run logs a warning and
+training completes anyway. A metrics sink should not be able to take down the
+pipeline.
+
+## Drift Detection
+
+Batch scoring runs against the **held-out** split, not the training data, so
+drift numbers are meaningful. Numeric features are compared on mean/std shift
+(>10%), categoricals on Total Variation Distance (>0.1).
+
+```bash
+make score          # clean holdout    -> 0/7 numeric, 0/17 categorical drifted
+make score-drift    # perturbed batch  -> 3/7 numeric, 1/17 categorical drifted
+```
+
+## A/B Test Simulation
+
+Scoring customers is half the problem; the business question is whether acting
+on the scores retains anyone. High-risk customers are assigned to a retention
+offer or no contact, **stratified by predicted-risk decile** so both arms carry
+the same baseline risk, then evaluated:
+
+- Two-proportion z-test and chi-square on retention
+- Welch's t-test on net revenue per customer
+- 95% confidence intervals, Cohen's h/d, and the minimum detectable effect
+- An **A/A negative control** that must come out non-significant
+
+```
+A/B test — retention offer (20% assumed churn reduction)
+Metric               Treatment  Control  Difference  p-value  Verdict
+Retention rate           41.4%    29.8%      +11.6%   0.0035  significant
+Net revenue/customer      $325     $263        +$62   0.1036  not significant
+
+A/A negative control — no treatment effect injected
+Retention rate           26.2%    23.4%       +2.8%   0.4301  not significant
+```
+
+The revenue result being *non*-significant while retention is significant is the
+honest readout: a $50 offer against high-variance revenue needs a larger sample.
+
+## API
+
+```bash
+make api          # or: make docker-run
+```
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Liveness — 200 whenever the process is up |
+| `GET` | `/ready` | Readiness — 503 until a model is loaded |
+| `POST` | `/predict` | Churn probability and risk band for one customer |
+| `GET` | `/model/info` | Deployed version, type, metrics and top SHAP features |
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"customerID":"7590-VHVEG","gender":"Female","SeniorCitizen":0,"Partner":"Yes",
+       "Dependents":"No","tenure":1,"PhoneService":"No","MultipleLines":"No phone service",
+       "InternetService":"DSL","OnlineSecurity":"No","OnlineBackup":"Yes",
+       "DeviceProtection":"No","TechSupport":"No","StreamingTV":"No","StreamingMovies":"No",
+       "Contract":"Month-to-month","PaperlessBilling":"Yes","PaymentMethod":"Electronic check",
+       "MonthlyCharges":29.85,"TotalCharges":29.85}'
+```
+
+```json
+{
+  "customerID": "7590-VHVEG",
+  "churn_probability": 0.8414804970801406,
+  "risk_category": "High",
+  "model_version": "20260830-124941",
+  "timestamp": "2026-08-30T12:51:43.594095"
+}
+```
+
+Liveness and readiness are separate on purpose: probes check status codes, not
+bodies, so a 200 response saying "no model" would still get the pod added to the
+load balancer. `/ready` returns 503 instead, and retries loading — so a pod that
+starts before training finishes becomes ready on its own, without a restart.
+
+## Orchestration (Airflow)
+
+```
+ingest_sql → train → evaluate_gate ─┬─> promote_model → batch_score → drift_gate → ab_test
+                                    └─> reject_model  (fails the run)
+```
+
+`evaluate_gate` branches on test ROC-AUC against a threshold, so a regression
+stops at `reject_model` instead of quietly shipping; `drift_gate` fails the run
+when the scored batch has drifted. Gate logic lives in `src/telco_churn/gates.py`
+— stdlib only, unit-tested without an Airflow install.
+
+Airflow pins its own dependency versions, so it gets a separate environment:
+
+```bash
+make airflow-install    # isolated venv, official Airflow constraints
+make airflow-run        # http://localhost:8080
+```
+
+Verified by running the DAG end to end on Airflow 2.10.3: all 8 tasks succeeded,
+the gate branched to `promote_model` and correctly skipped `reject_model`, and
+raising the threshold above the achievable AUC flipped it to a failed run with
+`Model rejected: ROC-AUC 0.8458 is below the 0.99 threshold`.
+
+The scheduler environment has **no ML dependencies at all** — verified by
+importing `gates.py` there with pandas, scikit-learn, LightGBM, XGBoost, SHAP
+and MLflow all absent. The gates are stdlib-only; everything heavier is shelled
+out to the project venv.
+
+Both verdict tasks run with `retries=0`. A quality gate reaching a verdict on a
+finished model is deterministic, so retrying reaches the same conclusion and
+only delays the alert — the transient-failure tasks around them keep `retries=2`.
 
 ## Docker
 
 ```bash
-# Build the image
-make docker-build
-
-# Run batch scoring
-docker run --rm \
-  -v $(pwd)/data:/home/mluser/app/data \
-  -v $(pwd)/outputs:/home/mluser/app/outputs \
-  -v $(pwd)/artifacts:/home/mluser/app/artifacts \
-  telco-churn-mlops make score
-
-# Run the API server
-make docker-run
+make docker-build     # 1.69GB
+make docker-run       # API on :8000
 ```
 
-## API
+The image derives a runtime subset from `requirements.txt` rather than keeping a
+second dependency list: `xgboost` becomes `xgboost-cpu` (the Linux xgboost wheel
+hard-depends on 457MB of CUDA this image never runs) and notebook/test packages
+are dropped. Verified to produce byte-identical predictions to a host run.
 
-FastAPI serves real-time churn predictions on port 8000.
+## Kubernetes
+
+Enable Kubernetes in Docker Desktop (Settings → Kubernetes), or use minikube —
+see [`k8s/README.md`](k8s/README.md) for both paths.
 
 ```bash
-# Start locally
-make api
-
-# Start via Docker
-make docker-run
+docker build -t telco-churn-mlops:latest .
+make k8s-deploy && make k8s-status
 ```
 
-**Endpoints:**
+Deployment (2 replicas, startup/readiness/liveness probes, zero-downtime
+rollout) + Service, a training Job, and a nightly scoring CronJob, sharing a
+persistent artifacts volume.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/health` | Health check for load balancers |
-| `POST` | `/predict` | Predict churn for a single customer |
-| `GET` | `/model/info` | Model version and performance metrics |
+Verified end to end on a live cluster: the training Job writes the model to the
+shared PVC, the API pods sit at `0/1` and out of the Service until it appears,
+then reach `1/1` with zero restarts, and the CronJob scores the held-out batch
+using the model the Job produced.
 
-**Example request:**
+See [`k8s/README.md`](k8s/README.md) for probe design, the `:latest` image trap,
+and the multi-node storage caveat.
+
+## BigQuery
+
 ```bash
-curl -X POST http://localhost:8000/predict \
-  -H "Content-Type: application/json" \
-  -d '{
-    "customerID": "7590-VHVEG",
-    "gender": "Female",
-    "SeniorCitizen": 0,
-    "Partner": "Yes",
-    "Dependents": "No",
-    "tenure": 1,
-    "PhoneService": "No",
-    "MultipleLines": "No phone service",
-    "InternetService": "DSL",
-    "OnlineSecurity": "No",
-    "OnlineBackup": "Yes",
-    "DeviceProtection": "No",
-    "TechSupport": "No",
-    "StreamingTV": "No",
-    "StreamingMovies": "No",
-    "Contract": "Month-to-month",
-    "PaperlessBilling": "Yes",
-    "PaymentMethod": "Electronic check",
-    "MonthlyCharges": 29.85,
-    "TotalCharges": 29.85
-  }'
+gcloud auth application-default login    # one-time
+
+make bq-load          # cleaned data -> BigQuery
+make bq-features      # query engineered features back out
+make bq-analytics     # churn by segment, computed in BigQuery
+make bq-predictions   # publish scored customers
+make bq-all           # load, analyse and publish
 ```
 
-**Example response:**
-```json
-{
-  "customerID": "7590-VHVEG",
-  "churn_probability": 0.435,
-  "risk_category": "Medium",
-  "timestamp": "2026-02-01T19:00:00"
-}
+`GCP_PROJECT` defaults to the active gcloud project, and nothing contacts
+Google without it — the rest of the pipeline runs unchanged with no cloud
+credentials.
+
+The same feature definitions run in three places, and the results are asserted
+equal, not assumed:
+
+| Backend | Where features are built |
+|---|---|
+| SQLite / Postgres | `sql/02_feature_engineering.sql` |
+| BigQuery | `FEATURE_QUERY` in `bigquery_loader.py` |
+| Python (serving) | `features.compute_engineered_features` |
+
+`test_bigquery_features_match_local_computation` checks the warehouse output
+against the Python serving path over all 7,043 rows; `TestTrainServeParity`
+does the same for the local SQL. Verified exact — zero difference across every
+engineered column.
+
+Reads go through pandas-gbq and the BigQuery Storage API, streaming results
+over gRPC rather than paging REST.
+
+## Tests
+
+```bash
+make test               # everything
+make unit-test          # no artifacts needed — runs on a cold checkout
+make integration-test   # asserts against a completed pipeline run
 ```
 
-## Makefile Targets
+167 tests (163 without GCP credentials, where the BigQuery live tests skip).
+Integration tests **skip** rather than fail when no pipeline has run, so a fresh
+clone is green. Notable coverage:
 
-| Target | Command | Description |
-|--------|---------|-------------|
-| `install` | `make install` | Install Python dependencies |
-| `validate` | `make validate` | Run data validation and cleaning |
-| `train` | `make train` | Train all models with Optuna tuning |
-| `train-quick` | `make train-quick` | Train all models without Optuna tuning |
-| `tune` | `make tune` | Train with 100 Optuna trials |
-| `score` | `make score` | Generate batch predictions + drift report |
-| `test` | `make test` | Run all tests |
-| `unit-test` | `make unit-test` | Run unit tests only |
-| `api` | `make api` | Start FastAPI server locally |
-| `docker-build` | `make docker-build` | Build Docker image |
-| `docker-run` | `make docker-run` | Run API server in Docker |
-| `clean` | `make clean` | Remove bytecode and caches |
-
-## Model Details
-
-| Parameter | Value |
-|-----------|-------|
-| Algorithms | LightGBM, XGBoost, Logistic Regression |
-| Max Estimators | 500 (default), up to 1000 (tuned) |
-| Learning Rate | 0.05 (default), 0.01–0.3 (tuned) |
-| Num Leaves | 31 (default), 15–127 (tuned) |
-| Early Stopping | 50 rounds (validation AUC) |
-| Class Imbalance | `scale_pos_weight` (tree models), `class_weight="balanced"` (LR) |
-| Preprocessing | OrdinalEncoder (Contract), category dtype (nominals), OneHotEncoder (LR) |
-| Split Strategy | Stratified 80/10/10 (train/val/test) |
-| Tuning | Optuna (50 trials default, configurable via `--n-trials`) |
-| Explainability | SHAP TreeExplainer on best model |
-
-## Dataset
-
-The [Telco Customer Churn](https://www.kaggle.com/datasets/blastchar/telco-customer-churn) dataset from Kaggle.
-
-- **Records:** 7,043 customers
-- **Features:** 20 (demographics, account info, service subscriptions)
-- **Target:** Churn (binary — 26.5% positive class)
-
-| Feature Type | Count | Examples |
-|-------------|-------|----------|
-| Nominal | 14 | gender, Partner, InternetService, PaymentMethod |
-| Ordinal | 1 | Contract (Month-to-month < One year < Two year) |
-| Numeric | 4 | SeniorCitizen, tenure, MonthlyCharges, TotalCharges |
-| Identifier | 1 | customerID (dropped before training) |
+- Category codes stay stable when a scoring batch omits a category
+- The deployed model is the comparison winner (not a filtered subset's)
+- All three feature shapes are servable from the real fitted artifact
+- SQL, BigQuery and Python feature implementations agree row-for-row
+- A/A false-positive rate stays near α across 120 simulations
+- k8s manifests: claim references resolve, Service selector matches pod labels
+- The Airflow DAG imports no ML dependencies
 
 ## CI/CD
 
-GitHub Actions runs the full pipeline on every push to `main` and on pull requests:
+Four parallel jobs on every push and PR: unit tests (fast feedback) → full
+pipeline + integration tests, alongside manifest/DAG validation and a Docker
+build. Pip downloads and Docker layers are cached, trained models and reports
+are uploaded as workflow artifacts, and the model comparison table is written to
+the run summary.
+
+## Project Structure
 
 ```
-Install dependencies → Validate data → Train (--skip-tuning) → Batch score → Run tests
+├── .github/workflows/ml-pipeline.yml
+├── airflow/dags/telco_churn_dag.py    # orchestration with quality gates
+├── k8s/                               # Deployment, Service, Job, CronJob
+├── sql/                               # versioned cleaning + feature SQL
+├── src/telco_churn/
+│   ├── features.py                    # feature defs + fitted transform
+│   ├── inference.py                   # shared serving path
+│   ├── gates.py                       # promotion / drift predicates
+│   ├── db.py, sql_features.py         # SQL layer
+│   ├── train.py, batch_score.py       # training and batch scoring
+│   ├── tracking.py                    # MLflow
+│   ├── ab_test.py                     # experiment simulation
+│   ├── bigquery_loader.py             # warehouse path
+│   └── api.py                         # FastAPI
+├── tests/                             # 162 tests
+├── docker-compose.yml                 # Postgres + MLflow server
+└── requirements.txt / requirements-airflow.txt
 ```
 
-See [`.github/workflows/ml-pipeline.yml`](.github/workflows/ml-pipeline.yml) for the workflow definition.
+## Dataset
+
+[Telco Customer Churn](https://www.kaggle.com/datasets/blastchar/telco-customer-churn)
+— 7,043 customers, 20 features, 26.5% churn rate. The 11 records with a blank
+`TotalCharges` are all `tenure = 0` (new customers, never billed) and are
+median-imputed.
 
 ## Tech Stack
 
-- **ML:** LightGBM, XGBoost, scikit-learn, Optuna, SHAP
-- **API:** FastAPI, Uvicorn, Pydantic
-- **Data:** pandas, NumPy, PyArrow
-- **CLI:** Typer, Rich
-- **Serialization:** joblib, Parquet
-- **Containerization:** Docker
-- **CI/CD:** GitHub Actions
-- **Orchestration:** GNU Make
+**ML:** LightGBM · XGBoost · scikit-learn · Optuna · SHAP
+**Serving:** FastAPI · Uvicorn · Pydantic
+**Data:** pandas · NumPy · PyArrow · SQLAlchemy · SQLite/Postgres · BigQuery
+**MLOps:** MLflow · Airflow · Docker · Kubernetes · GitHub Actions
+**Stats:** SciPy
 
 ## License
 
