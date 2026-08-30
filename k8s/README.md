@@ -31,20 +31,24 @@ shares Docker Desktop's image store, so a normal build is immediately visible
 to it — no loading step:
 
 ```bash
-docker build -t telco-churn-mlops:latest .
+make docker-build     # tags telco-churn-mlops:$(VERSION) and :latest
 kubectl config use-context docker-desktop
 ```
 
 ### Option B — minikube
 
 minikube runs its own Docker daemon, so the image must be built inside it (or
-side-loaded with `minikube image load telco-churn-mlops:latest`):
+side-loaded with `minikube image load telco-churn-mlops:0.2.0`):
 
 ```bash
 minikube start --memory=4096
 eval $(minikube docker-env)
-docker build -t telco-churn-mlops:latest .
+make docker-build
 ```
+
+The tag matters: the manifests pin `telco-churn-mlops:0.2.0`, so an image
+tagged only `:latest` leaves the pods in `ImagePullBackOff`. `make docker-build`
+applies both tags from the Makefile's `VERSION`.
 
 ### Then, for either option
 

@@ -344,9 +344,13 @@ Enable Kubernetes in Docker Desktop (Settings â†’ Kubernetes), or use minikube â
 see [`k8s/README.md`](k8s/README.md) for both paths.
 
 ```bash
-docker build -t telco-churn-mlops:latest .
+make docker-build            # tags both the pinned version and :latest
 make k8s-deploy && make k8s-status
 ```
+
+Build with `make docker-build` rather than a bare `docker build`: the manifests
+pin an immutable tag (`VERSION` in the Makefile), and an image tagged only
+`:latest` will not satisfy them.
 
 Deployment (2 replicas, startup/readiness/liveness probes, zero-downtime
 rollout) + Service, a training Job, and a nightly scoring CronJob, sharing a
