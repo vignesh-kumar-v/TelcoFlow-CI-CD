@@ -1,5 +1,5 @@
 # Multi-stage build for efficiency
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -9,9 +9,26 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
+# Copy requirements and install Python dependencies.
+#
+# requirements.txt stays the single source of truth; the image derives a runtime
+# subset from it so the two cannot drift:
+#
+#   * xgboost -> xgboost-cpu. The Linux xgboost wheel hard-depends on
+#     nvidia-nccl-cu12, which is 457MB of CUDA this image never executes. The
+#     macOS wheel has no such dependency, which is why requirements.txt does not
+#     list it. Same package, same version, same `import xgboost`.
+#   * Notebook, debugger and test-only packages are dropped: nothing in
+#     src/telco_churn imports them, and notebooks/ is excluded by .dockerignore.
+#
+# Anything genuinely needed at runtime must NOT be listed here — Pygments for
+# instance is a rich dependency and stays.
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN set -eux; \
+    sed 's/^xgboost==/xgboost-cpu==/I' requirements.txt \
+      | grep -vEi '^(ipykernel|ipython|ipython[-_]pygments[-_]lexers|jupyter[-_]client|jupyter[-_]core|matplotlib[-_]inline|debugpy|nest[-_]asyncio|pyzmq|tornado|traitlets|comm|jedi|parso|pexpect|ptyprocess|prompt[-_]toolkit|pure[-_]eval|stack[-_]data|asttokens|executing|pytest|iniconfig|pluggy|seaborn)==' \
+      > requirements-runtime.txt; \
+    pip install --no-cache-dir --user -r requirements-runtime.txt
 
 # Final stage
 FROM python:3.11-slim
