@@ -32,7 +32,12 @@ winner's feature shape is recorded at training time and reproduced at serving.
   **24.6% recall**, so it misses three churners in four at the 0.5 threshold.
 
 **Top churn drivers** (SHAP on the deployed model): tenure, contract type,
-fiber-optic internet, monthly charges, and the engineered `avg_monthly_spend`.
+fiber-optic internet, monthly charges, and the engineered `avg_monthly_spend` —
+one of the SQL-derived features earning a top-six slot on its own merits.
+
+<p align="center">
+  <img src="docs/images/shap-summary.png" alt="SHAP summary plot — feature impact on churn prediction" width="620">
+</p>
 
 **Sharpest segment finding** — month-to-month customers in their first six
 months on premium plans churn at **77.1%**, nearly **3× the 26.5% base rate**:
@@ -181,8 +186,20 @@ run) and artifacts to MLflow; the winner is registered as a new version of
 `telco-churn-classifier`.
 
 ```bash
-make mlflow-ui     # http://localhost:5000
+make mlflow-ui                    # http://localhost:5000
+make mlflow-ui MLFLOW_PORT=5001   # macOS binds 5000 to AirPlay Receiver
 ```
+
+Each Optuna trial is a nested run, so the whole search is inspectable rather
+than collapsed into a single best-params line — 50 trials spanning validation
+AUC 0.8126 to 0.8397 below:
+
+![MLflow runs with nested Optuna trials](docs/images/mlflow-runs.png)
+
+The winner is registered as a new version, each annotated with the algorithm
+and score at registration time:
+
+![MLflow model registry versions](docs/images/mlflow-registry.png)
 
 Tracking is best-effort: if MLflow is unavailable the run logs a warning and
 training completes anyway. A metrics sink should not be able to take down the
@@ -264,6 +281,12 @@ curl -X POST http://localhost:8000/predict \
   "timestamp": "2026-08-30T12:51:43.594095"
 }
 ```
+
+Pydantic validates every field before the model is touched, so malformed
+requests get a 422 rather than an opaque 500. Interactive docs are generated at
+`/docs`:
+
+![FastAPI interactive docs returning a live prediction](docs/images/api-docs.png)
 
 Liveness and readiness are separate on purpose: probes check status codes, not
 bodies, so a 200 response saying "no model" would still get the pod added to the

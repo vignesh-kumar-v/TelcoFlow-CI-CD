@@ -60,8 +60,12 @@ api: ## Start the FastAPI server locally
 	$(PYTHON) -m src.telco_churn.api
 
 # --- Experiment tracking ------------------------------------------------
-mlflow-ui: ## Browse runs and the model registry at http://localhost:5000
-	$(PYTHON) -m mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5000
+# macOS binds port 5000 to the AirPlay Receiver, so make it overridable:
+#   make mlflow-ui MLFLOW_PORT=5001
+MLFLOW_PORT ?= 5000
+
+mlflow-ui: ## Browse runs and the model registry (MLFLOW_PORT=5001 to override)
+	$(PYTHON) -m mlflow ui --backend-store-uri sqlite:///mlflow.db --port $(MLFLOW_PORT)
 
 # --- Docker -------------------------------------------------------------
 # Bump VERSION when the image changes and you want Kubernetes to pick it up:
