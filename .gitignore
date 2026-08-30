@@ -42,7 +42,21 @@ build/
 
 # ML experiment tracking
 mlruns/
+mlflow.db
 .dvc/
+
+# Local databases built by the SQL layer
+data/*.db
+*.sqlite
+*.sqlite3
+
+# Airflow (separate venv + AIRFLOW_HOME artifacts)
+.venv-airflow/
+airflow/logs/
+airflow/airflow.cfg
+airflow/airflow.db
+airflow/webserver_config.py
+airflow/standalone_admin_password.txt
 
 # Serialized models (standalone)
 *.pkl
@@ -70,3 +84,5 @@ Thumbs.db
 
 # Claude Code settings
 .claude/
+PROJECT_UNDERSTANDING.md
+further_additions.md

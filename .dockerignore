@@ -1,0 +1,42 @@
+# Virtual environments. Critical: the Makefile prefers venv/bin/python when it
+# exists, so copying a host venv into the image would point the container at a
+# host-platform interpreter that cannot run there.
+venv/
+.venv/
+.venv-airflow/
+
+# Generated at runtime; the container mounts or regenerates these.
+artifacts/
+outputs/
+reports/
+mlruns/
+mlflow.db
+data/processed/
+data/*.db
+
+# Version control and CI
+.git/
+.github/
+.gitignore
+
+# Local tooling and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+notebooks/
+.vscode/
+.idea/
+.claude/
+.DS_Store
+
+# Airflow home artifacts
+airflow/logs/
+airflow/*.cfg
+airflow/*.db
+
+# Docs and local notes
+PROJECT_UNDERSTANDING.md
+further_additions.md
