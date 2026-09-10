@@ -61,11 +61,28 @@ jobs:
       - name: Batch score
         run: make score
 
-      - name: Verify drift detection fires
-        run: make score-drift
+      - name: Pre-register the experiment design
+        run: make prereg
 
       - name: A/B test simulation
         run: make ab-test
+
+      - name: Customer segmentation
+        run: make segment
+
+      - name: Logistic regression interpretation
+        run: make interpret
+
+      - name: Causal inference
+        run: make causal
+
+      - name: BI extracts and Tableau workbook
+        run: make bi-export
+
+      # Last, because it deliberately corrupts the scored batch: running it
+      # earlier would leave every analysis above reading perturbed predictions.
+      - name: Verify drift detection fires
+        run: make score-drift
 
       - name: Run all tests
         run: make test
@@ -88,6 +105,17 @@ jobs:
           path: outputs/
           retention-days: 7
 
+      # Downloadable straight into Tableau or Power BI, without running anything.
+      - name: Upload BI extracts and dashboard scaffold
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bi-extracts-${{ github.run_number }}
+          path: |
+            outputs/bi/
+            dashboards/
+          retention-days: 14
+
       - name: Summarise the run
         if: always()
         run: |
@@ -105,6 +133,40 @@ jobs:
               print(f"| {name} | {m['roc_auc']:.4f} | {m['precision']:.3f} | {m['recall']:.3f} | {m['f1_score']:.3f} |")
           PY
           fi
+          python - <<'PY' >> $GITHUB_STEP_SUMMARY
+          import glob, json
+
+          def latest(prefix):
+              files = sorted(glob.glob(f"reports/{prefix}_*.json"))
+              return json.load(open(files[-1])) if files else None
+
+          ab = latest("ab_test")
+          if ab and ab.get("pre_registered_verdict"):
+              v = ab["pre_registered_verdict"]
+              print("### Experiment readout")
+              print(f"**{v['verdict'].upper()}** — effect {v['observed_effect']:+.1%}, "
+                    f"p={v['p_value']:.4f}, power {v['achieved_power']:.0%} against a "
+                    f"pre-registered {v['pre_registered_mde']:.1%} MDE "
+                    f"({v['available_n_per_arm']:,}/{v['required_n_per_arm']:,} per arm).")
+
+          seg = latest("segmentation")
+          if seg:
+              k = seg["k_selection"]["chosen_k"]
+              worst = max(seg["segments"], key=lambda s: s["monthly_revenue_at_risk"])
+              print(f"### Segmentation\n{k} segments; most exposed is "
+                    f"**{worst['name']}** — {worst['customers']:,} customers at "
+                    f"{worst['churn_rate']:.1%} churn, "
+                    f"${worst['monthly_revenue_at_risk']:,.0f}/month at risk.")
+
+          causal = latest("causal")
+          if causal:
+              p = causal["observational"]["primary"]
+              att = p["estimates"]["matching_att"]
+              print(f"### Causal\nTech Support ATT **{att['estimate']:+.1%}** "
+                    f"(95% CI {att['ci_95'][0]:+.1%} to {att['ci_95'][1]:+.1%}) "
+                    f"against a naive gap of {p['naive_difference']:+.1%} — "
+                    f"{p['diagnostics']['selection_bias_removed']:+.1%} of it was selection.")
+          PY
 
   # Manifests and DAG structure, validated without a cluster or an Airflow install.
   manifests:

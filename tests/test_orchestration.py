@@ -136,8 +136,32 @@ class TestDagStructure:
     def test_declares_expected_tasks(self, tree):
         source = DAG_FILE.read_text()
         for task_id in ("ingest_sql", "train", "evaluate_gate", "promote_model",
-                        "reject_model", "batch_score", "drift_gate", "ab_test"):
+                        "reject_model", "batch_score", "drift_gate", "prereg",
+                        "ab_test", "segment", "interpret", "causal", "bi_export"):
             assert f'"{task_id}"' in source, f"DAG missing task {task_id}"
+
+    def test_preregistration_runs_before_the_experiment(self):
+        """A design committed after the readout is not a pre-registration.
+
+        The whole point of `prereg` is that the MDE and required sample size are
+        fixed before any outcome exists. If the DAG ever ordered these the other
+        way, the readout would be judged against a plan written with knowledge of
+        the result — which is exactly what pre-registration exists to prevent.
+        """
+        source = DAG_FILE.read_text()
+        edge = source[source.index("ingest_sql >> train"):]
+        assert "prereg >> ab_test" in edge, (
+            "the design must be committed upstream of the experiment"
+        )
+
+    def test_export_waits_for_every_analysis(self):
+        """The dashboard extracts read all four analyses; a race would ship stale ones."""
+        source = DAG_FILE.read_text()
+        edge = source[source.index("ingest_sql >> train"):]
+        for task in ("ab_test", "segment", "interpret", "causal"):
+            assert task in edge.split("bi_export")[0].rsplit(">>", 1)[0], (
+                f"bi_export should depend on {task}"
+            )
 
     def test_gate_callables_are_defined(self, tree):
         defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}

@@ -2,12 +2,23 @@
 
     ingest_sql -> train -> evaluate_gate -> [promote_model | reject_model]
                                                   |
-                                            batch_score -> drift_gate -> ab_test
+                              batch_score -> drift_gate -> prereg -> ab_test
+                                                              |
+                                    segment, interpret, causal -> bi_export
 
 The interesting part is `evaluate_gate`: training producing a model is not the
 same as that model being fit to deploy. The gate reads the run's metrics and
 branches, so a regression below MIN_ROC_AUC stops at `reject_model` instead of
 quietly shipping. `drift_gate` does the same for the scored batch.
+
+`prereg` sits deliberately upstream of `ab_test`: the experiment's design is
+committed to disk before any outcome is drawn, so the readout can be judged
+against a plan rather than against hindsight. Ordering it the other way round in
+the DAG would make the pre-registration meaningless.
+
+The analysis tasks fan out in parallel — they read the same scored batch and do
+not depend on each other — and `bi_export` fans back in, because the dashboard
+extracts include results from all of them.
 
 Heavy ML steps shell out to the project venv rather than importing the training
 code, because Airflow pins its own dependency versions and is installed into a
@@ -154,11 +165,49 @@ with DAG(
         task_id="drift_gate", python_callable=drift_gate, retries=0,
     )
 
+    prereg = BashOperator(
+        task_id="prereg",
+        bash_command=f"cd {PROJECT_DIR} && {PYTHON_BIN} -m src.telco_churn.power",
+        doc_md=(
+            "Commit the experiment design — MDE, alpha, power and required sample "
+            "size — before any outcome exists."
+        ),
+    )
+
     ab_test = BashOperator(
         task_id="ab_test",
         bash_command=f"cd {PROJECT_DIR} && {PYTHON_BIN} -m src.telco_churn.ab_test",
-        doc_md="Simulate the retention campaign and evaluate significance.",
+        doc_md="Simulate the retention campaign and evaluate it against the plan.",
+    )
+
+    segment = BashOperator(
+        task_id="segment",
+        bash_command=f"cd {PROJECT_DIR} && {PYTHON_BIN} -m src.telco_churn.segmentation",
+        doc_md="Cluster the customer base and profile each segment's revenue at risk.",
+    )
+
+    interpret = BashOperator(
+        task_id="interpret",
+        bash_command=f"cd {PROJECT_DIR} && {PYTHON_BIN} -m src.telco_churn.interpret",
+        doc_md="Odds ratios, confidence intervals and VIF for the linear baseline.",
+    )
+
+    causal = BashOperator(
+        task_id="causal",
+        bash_command=f"cd {PROJECT_DIR} && {PYTHON_BIN} -m src.telco_churn.causal",
+        doc_md="Propensity scoring, instrumental variables, DiD and refutation tests.",
+    )
+
+    bi_export = BashOperator(
+        task_id="bi_export",
+        bash_command=f"cd {PROJECT_DIR} && {PYTHON_BIN} -m src.telco_churn.bi_export",
+        doc_md="Publish the BI extracts the Tableau dashboard reads.",
     )
 
     ingest_sql >> train >> gate >> [promote, reject]
-    promote >> batch_score >> check_drift >> ab_test
+    promote >> batch_score >> check_drift >> prereg >> ab_test
+
+    # The analyses share the scored batch and are independent of one another, so
+    # they run in parallel; the export waits for all of them plus the readout.
+    check_drift >> [segment, interpret, causal]
+    [ab_test, segment, interpret, causal] >> bi_export

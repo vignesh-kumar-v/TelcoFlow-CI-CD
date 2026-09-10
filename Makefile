@@ -1,5 +1,6 @@
 .PHONY: help install validate sql-features train train-quick tune score score-drift \
-        ab-test pipeline test unit-test integration-test api clean \
+        prereg ab-test segment causal interpret bi-export analysis \
+        pipeline test unit-test integration-test api clean \
         docker-build docker-run compose-up compose-down \
         mlflow-ui bq-load bq-features bq-analytics bq-predictions \
         airflow-install airflow-run k8s-deploy k8s-status k8s-delete
@@ -40,10 +41,30 @@ score: ## Score the held-out batch and write a drift report
 score-drift: ## Score a deliberately perturbed batch to demonstrate drift detection
 	$(PYTHON) -m src.telco_churn.batch_score --simulate-drift
 
+# prereg must run before ab-test: the design is committed to disk before any
+# outcome is drawn, and ab-test reads it back to judge the result against it.
+prereg: ## Compute and commit the pre-registered experiment design
+	$(PYTHON) -m src.telco_churn.power
+
 ab-test: ## Simulate a retention campaign and test for significance
 	$(PYTHON) -m src.telco_churn.ab_test
 
-pipeline: sql-features train-quick score ab-test ## Run the whole pipeline end to end
+# --- Analysis -----------------------------------------------------------
+segment: ## Cluster customers and profile the segments
+	$(PYTHON) -m src.telco_churn.segmentation
+
+causal: ## Estimate causal effects (propensity scoring, IV, DiD, refutation)
+	$(PYTHON) -m src.telco_churn.causal
+
+interpret: ## Odds ratios and VIF for the logistic regression baseline
+	$(PYTHON) -m src.telco_churn.interpret
+
+bi-export: ## Publish BI extracts and the Tableau workbook scaffold
+	$(PYTHON) -m src.telco_churn.bi_export
+
+analysis: segment interpret causal ## Run every analysis stage
+
+pipeline: sql-features train-quick score prereg ab-test analysis bi-export ## Run the whole pipeline end to end
 
 # --- Tests --------------------------------------------------------------
 test: ## Run every test
