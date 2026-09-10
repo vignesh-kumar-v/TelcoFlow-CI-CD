@@ -13,6 +13,9 @@ would:
   * Welch's t-test on retained revenue per customer
   * confidence interval and effect size, not just a p-value
   * an A/A negative control, which must come out non-significant
+  * the readout judged against the pre-registered design in reports/, so a
+    non-significant result in an under-powered study is reported as
+    inconclusive rather than as evidence of no effect
 
 The A/A run matters: a test that finds an effect where none was injected is
 measuring a bug in the harness, not a treatment.
@@ -32,6 +35,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 from scipy import stats
+
+from src.telco_churn.power import (
+    PreRegistration, holm_bonferroni, interpret_result, mde_for_sample_size,
+)
 
 console = Console()
 
@@ -178,11 +185,13 @@ def revenue_t_test(df: pd.DataFrame, column: str = "revenue_net"):
 
 
 def minimum_detectable_effect(n_per_arm: int, baseline_rate: float, power: float = 0.8):
-    """Smallest absolute change this sample size could reliably detect."""
-    z_alpha = stats.norm.ppf(1 - ALPHA / 2)
-    z_beta = stats.norm.ppf(power)
-    se = np.sqrt(2 * baseline_rate * (1 - baseline_rate) / n_per_arm)
-    return round(float((z_alpha + z_beta) * se), 4)
+    """Smallest absolute change this sample size could reliably detect.
+
+    Delegates to the power module so the readout and the pre-registration cannot
+    drift apart — two implementations of this formula quietly disagreeing would
+    have the experiment report one detectable effect and plan against another.
+    """
+    return round(mde_for_sample_size(n_per_arm, baseline_rate, ALPHA, power), 4)
 
 
 def run_experiment(targeted: pd.DataFrame, effect: float, offer_cost: float, seed: int):
@@ -239,6 +248,32 @@ def print_readout(result: dict, title: str):
     )
 
 
+def print_prereg_verdict(interpretation: dict, corrected: dict) -> None:
+    """Report the readout against the design that was committed before it ran."""
+    colour = {"significant": "green", "null": "blue", "inconclusive": "yellow"}[
+        interpretation["verdict"]
+    ]
+    console.print(
+        f"\n[bold]Pre-registered verdict:[/bold] [{colour}]"
+        f"{interpretation['verdict'].upper()}[/{colour}]"
+    )
+    console.print(f"  {interpretation['reading']}")
+    console.print(
+        f"  Planned MDE {interpretation['pre_registered_mde']:.1%} · "
+        f"power {interpretation['achieved_power']:.0%} · "
+        f"n {interpretation['available_n_per_arm']:,}/"
+        f"{interpretation['required_n_per_arm']:,} per arm"
+    )
+
+    console.print("\n[bold]Holm-Bonferroni across the metric family:[/bold]")
+    for name, r in corrected.items():
+        mark = "[green]holds" if r["significant_after_correction"] else "[yellow]does not hold"
+        console.print(
+            f"  {name:<24} p={r['p_value']:.4f}  "
+            f"threshold={r['adjusted_threshold']:.4f}  {mark}"
+        )
+
+
 def main(
     outputs_dir: Path = Path.cwd() / "outputs",
     reports_dir: Path = Path.cwd() / "reports",
@@ -281,6 +316,31 @@ def main(
     else:
         console.log("[green]A/A control is non-significant, as it should be")
 
+    # Judge the result against the design committed before any outcome existed.
+    # Without this, a non-significant readout is indistinguishable from a study
+    # that never had the power to find the effect in the first place.
+    prereg = PreRegistration.load(reports_dir)
+    interpretation, corrected = None, None
+    if prereg is None:
+        console.log(
+            "[yellow]No pre-registration found — run `make prereg` before the "
+            "experiment to get a design-aware readout."
+        )
+    else:
+        interpretation = interpret_result(
+            prereg,
+            ab_result["retention"]["absolute_difference"],
+            ab_result["retention"]["p_value"],
+        )
+        corrected = holm_bonferroni(
+            {
+                "retention rate": ab_result["retention"]["p_value"],
+                "net revenue/customer": ab_result["revenue"]["p_value"],
+            },
+            alpha=prereg.alpha,
+        )
+        print_prereg_verdict(interpretation, corrected)
+
     treated = outcomes[outcomes["group"] == "treatment"]
     net_gain = ab_result["revenue"]["difference"] * len(treated)
 
@@ -300,6 +360,9 @@ def main(
         },
         "ab_test": ab_result,
         "aa_control": aa_result,
+        "pre_registration": prereg.to_dict() if prereg else None,
+        "pre_registered_verdict": interpretation,
+        "multiple_comparisons": corrected,
         "business_impact": {
             "net_revenue_gain_treated_arm": round(float(net_gain), 2),
             "campaign_cost": round(float(offer_cost * len(treated)), 2),
