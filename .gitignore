@@ -86,3 +86,7 @@ Thumbs.db
 .claude/
 PROJECT_UNDERSTANDING.md
 further_additions.md
+
+# Generated BI extracts and the Tableau scaffold (it embeds an absolute
+# path to outputs/bi, so it is regenerated per machine by `make bi-export`)
+dashboards/telcoflow.twb
